@@ -9,7 +9,6 @@
 #define PORT 8080
 #define MAX_CLIENTS 521
 #define BUFFER_SIZE 1024
-#define MAX_STORE 100
 
 #define INITIAL_CAPACITY 101   // Initial bucket count; using a prime can be beneficial.
 #define LOAD_FACTOR_THRESHOLD 0.75
@@ -126,6 +125,7 @@ int insert(HashTable *table, const char *key, const char *value) {
 Node *search(HashTable *table, const char *key) {
     pthread_mutex_lock(&store_mutex);
     unsigned long index = hash(key) % table->capacity;
+    printf("Index: %ld\n", index);
     Node *node = table->buckets[index];
     while (node) {
         if (strcmp(node->key, key) == 0)
@@ -197,7 +197,7 @@ void free_table(HashTable *table) {
 // Dump the contents of the hash table as a string.
 char *dump_store(HashTable *table) {
     pthread_mutex_lock(&store_mutex);
-    char *dump = malloc(MAX_STORE);
+    char *dump = malloc(sizeof(Node)* table->count + 1);
     if (!dump) {
         perror("Failed to allocate dump string");
         exit(EXIT_FAILURE);
@@ -207,9 +207,9 @@ char *dump_store(HashTable *table) {
     for (size_t i = 0; i < table->capacity; i++) {
         Node *node = table->buckets[i];
         while (node) {
-            char line[MAX_STORE];
+            char line[sizeof(node->key) + sizeof(node->value) + 32];
             snprintf(line, sizeof(line), "%s: %s, %ld\n", node->key, node->value, node->created_at);
-            strncat(dump, line, MAX_STORE - strlen(dump) - 1);
+            strncat(dump, line, strlen(line));
             node = node->next;
         }
     }
