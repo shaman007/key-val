@@ -127,9 +127,10 @@ Node *search(HashTable *table, const char *key) {
     printf("Index: %ld\n", index);
     Node *node = table->buckets[index];
     while (node) {
-        if (strcmp(node->key, key) == 0)
+        if (strcmp(node->key, key) == 0) {
             pthread_mutex_unlock(&store_mutex);
             return node;
+        }
         node = node->next;
     }
     pthread_mutex_unlock(&store_mutex);
@@ -196,7 +197,7 @@ void free_table(HashTable *table) {
 // Dump the contents of the hash table as a string.
 char *dump_store(HashTable *table) {
     pthread_mutex_lock(&store_mutex);
-    char *dump = malloc(sizeof(Node)* table->count + 1);
+    char *dump = malloc(1);
     if (!dump) {
         perror("Failed to allocate dump string");
         exit(EXIT_FAILURE);
@@ -206,7 +207,7 @@ char *dump_store(HashTable *table) {
     for (size_t i = 0; i < table->capacity; i++) {
         Node *node = table->buckets[i];
         while (node) {
-            char line[sizeof(node->key) + sizeof(node->value) + 32];
+            char line[strlen(node->key) + strlen(node->value) + 32];
             snprintf(line, sizeof(line), "%s: %s, %ld\n", node->key, node->value, node->created_at);
             strncat(dump, line, strlen(line));
             node = node->next;
