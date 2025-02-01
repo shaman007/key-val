@@ -7,7 +7,7 @@
 #include <pthread.h>        // for pthreads
 
 #define PORT 8080
-#define MAX_CLIENTS 5
+#define MAX_CLIENTS 521
 #define BUFFER_SIZE 1024
 #define MAX_STORE 100
 
@@ -17,7 +17,8 @@ pthread_mutex_t store_mutex = PTHREAD_MUTEX_INITIALIZER;
 // Node structure for the linked list in each bucket.
 typedef struct Node {
     char *key;
-    char *value;           // Now a string.
+    char *value;
+    time_t created_at;  // Store creation time
     struct Node *next;
 } Node;
 
@@ -104,6 +105,7 @@ int insert(HashTable *table, const char *key, const char *value) {
                 perror("Failed to allocate new value string");
                 exit(EXIT_FAILURE);
             }
+            curr->created_at = time(NULL);
             pthread_mutex_unlock(&store_mutex);
             return 1;
         }
@@ -111,6 +113,7 @@ int insert(HashTable *table, const char *key, const char *value) {
 
     // Key not found; create a new node and insert at the beginning.
     Node *new_node = create_node(key, value);
+    new_node->created_at = time(NULL);
     new_node->next = head;
     table->buckets[index] = new_node;
     table->count++;
@@ -120,14 +123,14 @@ int insert(HashTable *table, const char *key, const char *value) {
 
 // Search for a key in the hash table. Returns the value string if found,
 // or NULL if the key does not exist.
-char *search(HashTable *table, const char *key) {
+Node *search(HashTable *table, const char *key) {
     pthread_mutex_lock(&store_mutex);
     unsigned long index = hash(key) % table->capacity;
     Node *node = table->buckets[index];
     while (node) {
         if (strcmp(node->key, key) == 0)
             pthread_mutex_unlock(&store_mutex);
-            return node->value;
+            return node;
         node = node->next;
     }
     pthread_mutex_unlock(&store_mutex);
@@ -207,7 +210,7 @@ char *dump_store(HashTable *table) {
         Node *node = table->buckets[i];
         while (node) {
             char line[MAX_STORE];
-            snprintf(line, sizeof(line), "%s: %s\n", node->key, node->value);
+            snprintf(line, sizeof(line), "%s: %s, %ld\n", node->key, node->value, node->created_at);
             strncat(dump, line, MAX_STORE - strlen(dump) - 1);
             node = node->next;
         }
@@ -278,10 +281,10 @@ void* client_handler(void* arg) {
                         send(client_socket, response, strlen(response), 0);
                     }
                 } else if (strcasecmp(command, "search") == 0) {
-                    char *found = search(table, key);
+                    Node *found = search(table, key);
                     if (found) {
                         char response[BUFFER_SIZE];
-                        snprintf(response, sizeof(response), "Found: %s\n", found);
+                        snprintf(response, sizeof(response), "Found: %s, timestamp: %ld\n", found->value, found->created_at);
                         send(client_socket, response, strlen(response), 0);
                     } else {
                         const char *response = "Not found\n";
@@ -376,7 +379,6 @@ int main() {
         if (pthread_create(&tid, NULL, client_handler, info) != 0) {
             perror("pthread_create");
             close(new_socket);
-            free(new_socket);
         } else {
             // Detach the thread so that resources are freed when it terminates.
             pthread_detach(tid);
