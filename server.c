@@ -139,7 +139,6 @@ Node *search(HashTable *table, const char *key) {
 
 // Resize the hash table to a new capacity.
 void resize_table(HashTable *table) {
-    pthread_mutex_lock(&store_mutex);    
     size_t old_capacity = table->capacity;
     size_t new_capacity = old_capacity * 2 + 1;  // Example growth strategy.
     Node **new_buckets = calloc(new_capacity, sizeof(Node *));
@@ -170,7 +169,6 @@ void resize_table(HashTable *table) {
 
     // The count remains unchanged.
     printf("Resized table to new capacity: %zu\n", new_capacity);
-    pthread_mutex_unlock(&store_mutex);
 }
 
 // Free all nodes in a linked list.
