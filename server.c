@@ -9,7 +9,6 @@
 #define PORT 8080
 #define MAX_CLIENTS 521
 #define BUFFER_SIZE 1024
-
 #define INITIAL_CAPACITY 101   // Initial bucket count; using a prime can be beneficial.
 #define LOAD_FACTOR_THRESHOLD 0.75
 pthread_mutex_t store_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -240,7 +239,6 @@ void* client_handler(void* arg) {
     int client_socket = info->client_socket;
     printf("Client socket: %d\n", client_socket);
     HashTable *table = info->table;
-    //free(arg);  // free the memory allocated in the main thread.
     char buffer[BUFFER_SIZE];
         // Process commands from the connected client.
         while (1) {
