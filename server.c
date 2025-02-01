@@ -209,6 +209,7 @@ char *dump_store(HashTable *table) {
         while (node) {
             char line[strlen(node->key) + strlen(node->value) + 32];
             snprintf(line, sizeof(line), "%s: %s, %ld\n", node->key, node->value, node->created_at);
+            dump = realloc(dump, strlen(dump) + strlen(line) + 1);
             strncat(dump, line, strlen(line));
             node = node->next;
         }
@@ -316,6 +317,7 @@ void* client_handler(void* arg) {
                 send(client_socket, response, strlen(response), 0);
             }
         }
+return NULL;
 }
 
 int main() {
@@ -323,7 +325,6 @@ int main() {
     struct sockaddr_in address;
     int opt = 1;
     int addrlen = sizeof(address);
-    char buffer[BUFFER_SIZE];
     HashTable *table = create_table(INITIAL_CAPACITY);
     client_info *info = malloc(sizeof(client_info));
     info->table = table;
