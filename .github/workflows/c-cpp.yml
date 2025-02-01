@@ -14,7 +14,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Install build tools
-      run: sudo apt-get install build-essential
+      run: sudo apt-get update && sudo apt-get install -y build-essential libpthread-stubs0-dev
     - name: configure
       run: bash ./configure
     - name: make
