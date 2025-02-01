@@ -177,6 +177,10 @@ int main() {
                 } else if (strcasecmp(command, "dump") == 0) {
                     char *dump = dump_store();
                     send(new_socket, dump, strlen(dump), 0);
+                } else if (strcasecmp(command, "quit") == 0) {
+                    const char *response = "Goodbye!\n";
+                    send(new_socket, response, strlen(response), 0);
+                    break;
                 } else {
                     const char *response = "Error: unknown command. Use write or search.\n";
                     send(new_socket, response, strlen(response), 0);
