@@ -1,0 +1,18 @@
+#!/bin/sh
+# This script generates a Makefile for building the server application
+
+cat << 'EOF' > Makefile
+# Auto-generated Makefile
+
+# Target to build the server executable
+server: server.c
+	@gcc -o server server.c
+
+# Clean target to remove the built executable
+clean:
+	@rm -f server
+
+.PHONY: clean
+EOF
+
+echo "Makefile created successfully."
