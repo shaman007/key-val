@@ -4,6 +4,7 @@
 #include <unistd.h>         // for close()
 #include <arpa/inet.h>      // for sockaddr_in and inet_ntoa
 #include <ctype.h>
+#include <pthread.h>        // for pthreads
 
 #define PORT 8080
 #define MAX_CLIENTS 5
@@ -12,7 +13,7 @@
 
 #define INITIAL_CAPACITY 101   // Initial bucket count; using a prime can be beneficial.
 #define LOAD_FACTOR_THRESHOLD 0.75
-
+pthread_mutex_t store_mutex = PTHREAD_MUTEX_INITIALIZER;
 // Node structure for the linked list in each bucket.
 typedef struct Node {
     char *key;
@@ -83,6 +84,7 @@ void resize_table(HashTable *table);
 
 // Insert a key-value pair into the hash table.
 int insert(HashTable *table, const char *key, const char *value) {
+    pthread_mutex_lock(&store_mutex);
     // Check if we need to resize before inserting.
     double load_factor = (double)table->count / table->capacity;
     if (load_factor > LOAD_FACTOR_THRESHOLD) {
@@ -102,7 +104,8 @@ int insert(HashTable *table, const char *key, const char *value) {
                 perror("Failed to allocate new value string");
                 exit(EXIT_FAILURE);
             }
-            return;
+            pthread_mutex_unlock(&store_mutex);
+            return 1;
         }
     }
 
@@ -111,24 +114,29 @@ int insert(HashTable *table, const char *key, const char *value) {
     new_node->next = head;
     table->buckets[index] = new_node;
     table->count++;
+    pthread_mutex_unlock(&store_mutex);
     return 1;
 }
 
 // Search for a key in the hash table. Returns the value string if found,
 // or NULL if the key does not exist.
 char *search(HashTable *table, const char *key) {
+    pthread_mutex_lock(&store_mutex);
     unsigned long index = hash(key) % table->capacity;
     Node *node = table->buckets[index];
     while (node) {
         if (strcmp(node->key, key) == 0)
+            pthread_mutex_unlock(&store_mutex);
             return node->value;
         node = node->next;
     }
+    pthread_mutex_unlock(&store_mutex);
     return NULL;
 }
 
 // Resize the hash table to a new capacity.
 void resize_table(HashTable *table) {
+    pthread_mutex_lock(&store_mutex);    
     size_t old_capacity = table->capacity;
     size_t new_capacity = old_capacity * 2 + 1;  // Example growth strategy.
     Node **new_buckets = calloc(new_capacity, sizeof(Node *));
@@ -159,6 +167,7 @@ void resize_table(HashTable *table) {
 
     // The count remains unchanged.
     printf("Resized table to new capacity: %zu\n", new_capacity);
+    pthread_mutex_unlock(&store_mutex);
 }
 
 // Free all nodes in a linked list.
@@ -174,16 +183,19 @@ void free_list(Node *node) {
 
 // Free the entire hash table.
 void free_table(HashTable *table) {
+    pthread_mutex_lock(&store_mutex);
     for (size_t i = 0; i < table->capacity; i++) {
         if (table->buckets[i])
             free_list(table->buckets[i]);
     }
     free(table->buckets);
     free(table);
+    pthread_mutex_unlock(&store_mutex);
 }
 
 // Dump the contents of the hash table as a string.
 char *dump_store(HashTable *table) {
+    pthread_mutex_lock(&store_mutex);
     char *dump = malloc(MAX_STORE);
     if (!dump) {
         perror("Failed to allocate dump string");
@@ -200,7 +212,7 @@ char *dump_store(HashTable *table) {
             node = node->next;
         }
     }
-
+    pthread_mutex_unlock(&store_mutex);
     return dump;
 }
 
@@ -216,6 +228,96 @@ void trim_newline(char *s) {
     }
 }
 
+typedef struct {
+    int client_socket;
+    HashTable *table; 
+} client_info;
+
+void* client_handler(void* arg) {    
+    client_info *info = (client_info *)arg;
+    printf("Client handler started\n");
+    int client_socket = info->client_socket;
+    printf("Client socket: %d\n", client_socket);
+    HashTable *table = info->table;
+    //free(arg);  // free the memory allocated in the main thread.
+    char buffer[BUFFER_SIZE];
+        // Process commands from the connected client.
+        while (1) {
+            memset(buffer, 0, BUFFER_SIZE);
+            int bytes_read = read(client_socket, buffer, BUFFER_SIZE - 1);
+            if (bytes_read <= 0) {
+                // Connection closed or error.
+                break;
+            }
+            
+            buffer[bytes_read] = '\0';
+            trim_newline(buffer);  // Remove newline if present.
+            
+            // We expect commands like:
+            //   write key value
+            //   search key
+            //   dump
+            //   quit
+            //   wipe
+            char command[16], key[256], value[768];
+            int num_tokens = sscanf(buffer, "%15s %255s %767[^\n]", command, key, value);
+            
+            if (num_tokens >= 1) {
+                // Compare commands case-insensitively.
+                if (strcasecmp(command, "write") == 0) {
+                    if (num_tokens == 3) {
+                        if (insert(table, key, value)) {
+                            const char *response = "OK\n";
+                            send(client_socket, response, strlen(response), 0);
+                        } else {
+                            const char *response = "Error: store full\n";
+                            send(client_socket, response, strlen(response), 0);
+                        }
+                    } else {
+                        const char *response = "Error: usage: write key value\n";
+                        send(client_socket, response, strlen(response), 0);
+                    }
+                } else if (strcasecmp(command, "search") == 0) {
+                    char *found = search(table, key);
+                    if (found) {
+                        char response[BUFFER_SIZE];
+                        snprintf(response, sizeof(response), "Found: %s\n", found);
+                        send(client_socket, response, strlen(response), 0);
+                    } else {
+                        const char *response = "Not found\n";
+                        send(client_socket, response, strlen(response), 0);
+                    }
+                } else if (strcasecmp(command, "dump") == 0) {
+                    char *dump = dump_store(table);
+                    if (!dump) {
+                        const char *response = "Error: failed to dump store\n";
+                        send(client_socket, response, strlen(response), 0);
+                        continue;
+                    } else{
+                       send(client_socket, dump, strlen(dump), 0);
+                    }
+                } else if (strcasecmp(command, "wipe") == 0) {
+                    free_table(table);
+                    table = create_table(INITIAL_CAPACITY);
+                    const char *response = "All clean!\n";
+                    send(client_socket, response, strlen(response), 0);
+                } 
+                else if (strcasecmp(command, "quit") == 0) {
+                    const char *response = "Goodbye!\n";
+                    send(client_socket, response, strlen(response), 0);
+                    close(client_socket);
+                    break;
+                } else {
+                    const char *response = "Error: unknown command. Use write, search, dump, wipe or quit.\n";
+                    send(client_socket, response, strlen(response), 0);
+                }
+            } else {
+                const char *response = "Error: invalid command format.\n";
+                send(client_socket, response, strlen(response), 0);
+            }
+        }
+}
+
 int main() {
     int server_fd, new_socket;
     struct sockaddr_in address;
@@ -223,7 +325,8 @@ int main() {
     int addrlen = sizeof(address);
     char buffer[BUFFER_SIZE];
     HashTable *table = create_table(INITIAL_CAPACITY);
-
+    client_info *info = malloc(sizeof(client_info));
+    info->table = table;
     // Create socket file descriptor.
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         perror("socket failed");
@@ -266,89 +369,20 @@ int main() {
             perror("accept");
             continue;
         }
-        
         printf("Accepted connection from %s:%d\n", 
                inet_ntoa(address.sin_addr), ntohs(address.sin_port));
-        
-        // Process commands from the connected client.
-        while (1) {
-            memset(buffer, 0, BUFFER_SIZE);
-            int bytes_read = read(new_socket, buffer, BUFFER_SIZE - 1);
-            if (bytes_read <= 0) {
-                // Connection closed or error.
-                break;
-            }
-            
-            buffer[bytes_read] = '\0';
-            trim_newline(buffer);  // Remove newline if present.
-            
-            // We expect commands like:
-            //   write key value
-            //   search key
-            //   dump
-            //   quit
-            //   wipe
-            char command[16], key[256], value[768];
-            int num_tokens = sscanf(buffer, "%15s %255s %767[^\n]", command, key, value);
-            
-            if (num_tokens >= 1) {
-                // Compare commands case-insensitively.
-                if (strcasecmp(command, "write") == 0) {
-                    if (num_tokens == 3) {
-                        if (insert(table, key, value)) {
-                            const char *response = "OK\n";
-                            send(new_socket, response, strlen(response), 0);
-                        } else {
-                            const char *response = "Error: store full\n";
-                            send(new_socket, response, strlen(response), 0);
-                        }
-                    } else {
-                        const char *response = "Error: usage: write key value\n";
-                        send(new_socket, response, strlen(response), 0);
-                    }
-                } else if (strcasecmp(command, "search") == 0) {
-                    char *found = search(table, key);
-                    if (found) {
-                        char response[BUFFER_SIZE];
-                        snprintf(response, sizeof(response), "Found: %s\n", found);
-                        send(new_socket, response, strlen(response), 0);
-                    } else {
-                        const char *response = "Not found\n";
-                        send(new_socket, response, strlen(response), 0);
-                    }
-                } else if (strcasecmp(command, "dump") == 0) {
-                    char *dump = dump_store(table);
-                    if (!dump) {
-                        const char *response = "Error: failed to dump store\n";
-                        send(new_socket, response, strlen(response), 0);
-                        continue;
-                    } else{
-                       send(new_socket, dump, strlen(dump), 0);
-                    }
-                } else if (strcasecmp(command, "wipe") == 0) {
-                    free_table(table);
-                    table = create_table(INITIAL_CAPACITY);
-                    const char *response = "All clean!\n";
-                    send(new_socket, response, strlen(response), 0);
-                } 
-                else if (strcasecmp(command, "quit") == 0) {
-                    const char *response = "Goodbye!\n";
-                    send(new_socket, response, strlen(response), 0);
-                    break;
-                } else {
-                    const char *response = "Error: unknown command. Use write or search.\n";
-                    send(new_socket, response, strlen(response), 0);
-                }
-            } else {
-                const char *response = "Error: invalid command format.\n";
-                send(new_socket, response, strlen(response), 0);
-            }
-        }
-        
-        close(new_socket);
+        info->client_socket = new_socket;
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, client_handler, info) != 0) {
+            perror("pthread_create");
+            close(new_socket);
+            free(new_socket);
+        } else {
+            // Detach the thread so that resources are freed when it terminates.
+            pthread_detach(tid);
+        }       
         printf("Connection closed\n");
     }
-    
     // Close the server socket (unreachable in this loop, but good practice).
     close(server_fd);
     return 0;
