@@ -10,59 +10,197 @@
 #define BUFFER_SIZE 1024
 #define MAX_STORE 100
 
-// A simple structure to hold a key-value pair.
-typedef struct {
-    char key[256];
-    char value[768];
-} kv_pair;
+#define INITIAL_CAPACITY 101   // Initial bucket count; using a prime can be beneficial.
+#define LOAD_FACTOR_THRESHOLD 0.75
 
-// Global store and its count.
-kv_pair store[MAX_STORE];
-int store_count = 0;
+// Node structure for the linked list in each bucket.
+typedef struct Node {
+    char *key;
+    char *value;           // Now a string.
+    struct Node *next;
+} Node;
 
-// Function to add/update a key-value pair.
-int set_value(const char *key, const char *value) {
-    // Update if key already exists.
-    for (int i = 0; i < store_count; i++) {
-        if (strcmp(store[i].key, key) == 0) {
-            strncpy(store[i].value, value, sizeof(store[i].value) - 1);
-            store[i].value[sizeof(store[i].value) - 1] = '\0';
-            return 1; // Updated
-        }
-    }
-    // Insert new pair if there is space.
-    if (store_count < MAX_STORE) {
-        strncpy(store[store_count].key, key, sizeof(store[store_count].key) - 1);
-        store[store_count].key[sizeof(store[store_count].key) - 1] = '\0';
-        strncpy(store[store_count].value, value, sizeof(store[store_count].value) - 1);
-        store[store_count].value[sizeof(store[store_count].value) - 1] = '\0';
-        store_count++;
-        return 1; // Inserted
-    }
-    return 0; // Store full
+// Hash table structure.
+typedef struct HashTable {
+    Node **buckets;
+    size_t capacity;       // Total number of buckets.
+    size_t count;          // Number of key-value pairs stored.
+} HashTable;
+
+// djb2 hash function by Dan Bernstein.
+unsigned long hash(const char *str) {
+    unsigned long hash = 5381;
+    int c;
+    while ((c = *str++))
+        hash = ((hash << 5) + hash) + c; // hash * 33 + c
+    return hash;
 }
 
-// Function to retrieve a value by key.
-char* get_value(const char *key) {
-    for (int i = 0; i < store_count; i++) {
-        if (strcmp(store[i].key, key) == 0) {
-            return store[i].value;
+// Create a new hash table.
+HashTable *create_table(size_t capacity) {
+    HashTable *table = malloc(sizeof(HashTable));
+    if (!table) {
+        perror("Failed to allocate hash table");
+        exit(EXIT_FAILURE);
+    }
+    table->capacity = capacity;
+    table->count = 0;
+    table->buckets = calloc(table->capacity, sizeof(Node *));
+    if (!table->buckets) {
+        perror("Failed to allocate buckets");
+        free(table);
+        exit(EXIT_FAILURE);
+    }
+    return table;
+}
+
+// Create a new node with key and value.
+Node *create_node(const char *key, const char *value) {
+    Node *new_node = malloc(sizeof(Node));
+    if (!new_node) {
+        perror("Failed to allocate node");
+        exit(EXIT_FAILURE);
+    }
+    new_node->key = strdup(key);
+    if (!new_node->key) {
+        perror("Failed to allocate key string");
+        free(new_node);
+        exit(EXIT_FAILURE);
+    }
+    new_node->value = strdup(value);
+    if (!new_node->value) {
+        perror("Failed to allocate value string");
+        free(new_node->key);
+        free(new_node);
+        exit(EXIT_FAILURE);
+    }
+    new_node->next = NULL;
+    return new_node;
+}
+
+// Forward declaration for rehashing.
+void resize_table(HashTable *table);
+
+// Insert a key-value pair into the hash table.
+int insert(HashTable *table, const char *key, const char *value) {
+    // Check if we need to resize before inserting.
+    double load_factor = (double)table->count / table->capacity;
+    if (load_factor > LOAD_FACTOR_THRESHOLD) {
+        resize_table(table);
+    }
+
+    unsigned long index = hash(key) % table->capacity;
+    Node *head = table->buckets[index];
+
+    // Check if the key already exists; if so, update its value.
+    for (Node *curr = head; curr != NULL; curr = curr->next) {
+        if (strcmp(curr->key, key) == 0) {
+            // Replace the existing value.
+            free(curr->value);
+            curr->value = strdup(value);
+            if (!curr->value) {
+                perror("Failed to allocate new value string");
+                exit(EXIT_FAILURE);
+            }
+            return;
         }
+    }
+
+    // Key not found; create a new node and insert at the beginning.
+    Node *new_node = create_node(key, value);
+    new_node->next = head;
+    table->buckets[index] = new_node;
+    table->count++;
+    return 1;
+}
+
+// Search for a key in the hash table. Returns the value string if found,
+// or NULL if the key does not exist.
+char *search(HashTable *table, const char *key) {
+    unsigned long index = hash(key) % table->capacity;
+    Node *node = table->buckets[index];
+    while (node) {
+        if (strcmp(node->key, key) == 0)
+            return node->value;
+        node = node->next;
     }
     return NULL;
 }
 
-char* dump_store() {
-    char *dump = malloc(MAX_STORE * (256 + 768));
-    if (dump == NULL) {
-        return NULL;
+// Resize the hash table to a new capacity.
+void resize_table(HashTable *table) {
+    size_t old_capacity = table->capacity;
+    size_t new_capacity = old_capacity * 2 + 1;  // Example growth strategy.
+    Node **new_buckets = calloc(new_capacity, sizeof(Node *));
+    if (!new_buckets) {
+        perror("Failed to allocate new buckets during resize");
+        exit(EXIT_FAILURE);
     }
-    dump[0] = '\0';
-    for (int i = 0; i < store_count; i++) {
-        char line[1024];
-        snprintf(line, sizeof(line), "%s: %s\n", store[i].key, store[i].value);
-        strncat(dump, line, MAX_STORE * (256 + 768) - strlen(dump) - 1);
+
+    // Rehash all existing entries into the new bucket array.
+    for (size_t i = 0; i < old_capacity; i++) {
+        Node *node = table->buckets[i];
+        while (node) {
+            Node *next_node = node->next; // Save next pointer.
+
+            unsigned long new_index = hash(node->key) % new_capacity;
+            // Insert node into new bucket list.
+            node->next = new_buckets[new_index];
+            new_buckets[new_index] = node;
+
+            node = next_node;
+        }
     }
+
+    // Replace old buckets with new buckets.
+    free(table->buckets);
+    table->buckets = new_buckets;
+    table->capacity = new_capacity;
+
+    // The count remains unchanged.
+    printf("Resized table to new capacity: %zu\n", new_capacity);
+}
+
+// Free all nodes in a linked list.
+void free_list(Node *node) {
+    while (node) {
+        Node *temp = node;
+        node = node->next;
+        free(temp->key);
+        free(temp->value);
+        free(temp);
+    }
+}
+
+// Free the entire hash table.
+void free_table(HashTable *table) {
+    for (size_t i = 0; i < table->capacity; i++) {
+        if (table->buckets[i])
+            free_list(table->buckets[i]);
+    }
+    free(table->buckets);
+    free(table);
+}
+
+// Dump the contents of the hash table as a string.
+char *dump_store(HashTable *table) {
+    char *dump = malloc(MAX_STORE);
+    if (!dump) {
+        perror("Failed to allocate dump string");
+        exit(EXIT_FAILURE);
+    }
+    dump[0] = '\0';  // Start with an empty string.
+
+    for (size_t i = 0; i < table->capacity; i++) {
+        Node *node = table->buckets[i];
+        while (node) {
+            char line[MAX_STORE];
+            snprintf(line, sizeof(line), "%s: %s\n", node->key, node->value);
+            strncat(dump, line, MAX_STORE - strlen(dump) - 1);
+            node = node->next;
+        }
+    }
+
     return dump;
 }
 
@@ -84,6 +222,7 @@ int main() {
     int opt = 1;
     int addrlen = sizeof(address);
     char buffer[BUFFER_SIZE];
+    HashTable *table = create_table(INITIAL_CAPACITY);
 
     // Create socket file descriptor.
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
@@ -148,6 +287,7 @@ int main() {
             //   search key
             //   dump
             //   quit
+            //   wipe
             char command[16], key[256], value[768];
             int num_tokens = sscanf(buffer, "%15s %255s %767[^\n]", command, key, value);
             
@@ -155,7 +295,7 @@ int main() {
                 // Compare commands case-insensitively.
                 if (strcasecmp(command, "write") == 0) {
                     if (num_tokens == 3) {
-                        if (set_value(key, value)) {
+                        if (insert(table, key, value)) {
                             const char *response = "OK\n";
                             send(new_socket, response, strlen(response), 0);
                         } else {
@@ -167,7 +307,7 @@ int main() {
                         send(new_socket, response, strlen(response), 0);
                     }
                 } else if (strcasecmp(command, "search") == 0) {
-                    char *found = get_value(key);
+                    char *found = search(table, key);
                     if (found) {
                         char response[BUFFER_SIZE];
                         snprintf(response, sizeof(response), "Found: %s\n", found);
@@ -177,9 +317,21 @@ int main() {
                         send(new_socket, response, strlen(response), 0);
                     }
                 } else if (strcasecmp(command, "dump") == 0) {
-                    char *dump = dump_store();
-                    send(new_socket, dump, strlen(dump), 0);
-                } else if (strcasecmp(command, "quit") == 0) {
+                    char *dump = dump_store(table);
+                    if (!dump) {
+                        const char *response = "Error: failed to dump store\n";
+                        send(new_socket, response, strlen(response), 0);
+                        continue;
+                    } else{
+                       send(new_socket, dump, strlen(dump), 0);
+                    }
+                } else if (strcasecmp(command, "wipe") == 0) {
+                    free_table(table);
+                    table = create_table(INITIAL_CAPACITY);
+                    const char *response = "All clean!\n";
+                    send(new_socket, response, strlen(response), 0);
+                } 
+                else if (strcasecmp(command, "quit") == 0) {
                     const char *response = "Goodbye!\n";
                     send(new_socket, response, strlen(response), 0);
                     break;
