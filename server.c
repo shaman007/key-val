@@ -146,6 +146,8 @@ int main() {
             // We expect commands like:
             //   write key value
             //   search key
+            //   dump
+            //   quit
             char command[16], key[256], value[768];
             int num_tokens = sscanf(buffer, "%15s %255s %767[^\n]", command, key, value);
             
