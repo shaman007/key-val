@@ -52,6 +52,20 @@ char* get_value(const char *key) {
     return NULL;
 }
 
+char* dump_store() {
+    char *dump = malloc(MAX_STORE * (256 + 768));
+    if (dump == NULL) {
+        return NULL;
+    }
+    dump[0] = '\0';
+    for (int i = 0; i < store_count; i++) {
+        char line[1024];
+        snprintf(line, sizeof(line), "%s: %s\n", store[i].key, store[i].value);
+        strncat(dump, line, MAX_STORE * (256 + 768) - strlen(dump) - 1);
+    }
+    return dump;
+}
+
 // Helper to trim newline and carriage return characters.
 void trim_newline(char *s) {
     char *p = s;
@@ -135,7 +149,7 @@ int main() {
             char command[16], key[256], value[768];
             int num_tokens = sscanf(buffer, "%15s %255s %767[^\n]", command, key, value);
             
-            if (num_tokens >= 2) {
+            if (num_tokens >= 1) {
                 // Compare commands case-insensitively.
                 if (strcasecmp(command, "write") == 0) {
                     if (num_tokens == 3) {
@@ -160,6 +174,9 @@ int main() {
                         const char *response = "Not found\n";
                         send(new_socket, response, strlen(response), 0);
                     }
+                } else if (strcasecmp(command, "dump") == 0) {
+                    char *dump = dump_store();
+                    send(new_socket, dump, strlen(dump), 0);
                 } else {
                     const char *response = "Error: unknown command. Use write or search.\n";
                     send(new_socket, response, strlen(response), 0);
