@@ -2,7 +2,7 @@
 # This script generates a Makefile for building the server application
 
 # Check for pthreads support
-if ! echo -e "#include <pthread.h>\nint main() { return 0; }" | gcc -x c - -o /dev/null -lpthread -v; then
+if ! echo -e "#include <pthread.h>\nint main() { return 0; }" | gcc -x c - -o /dev/null -lpthread 2>/dev/null; then
     echo "Error: pthreads library not found. Please install pthreads development package."
     exit 1
 fi
