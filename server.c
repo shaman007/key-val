@@ -1,23 +1,23 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <sys/epoll.h>
-#include <pthread.h>
-#include <errno.h>
-#include <ctype.h>
-#include <time.h>
+#include <stdio.h>     // For printf, perror, snprintf
+#include <stdlib.h>    // For malloc, calloc, realloc, free, exit
+#include <string.h>    // For strlen, strcmp, strdup, strtok, strncat, snprintf
+#include <unistd.h>    // For close, read, write
+#include <arpa/inet.h> // For sockaddr_in, inet_ntoa
+#include <fcntl.h>     // For fcntl
+#include <sys/epoll.h> // For epoll_create1, epoll_ctl, struct epoll_event
+#include <pthread.h>   // For pthread_create, pthread_mutex_t
+#include <errno.h>     // For EAGAIN, EWOULDBLOCK
+#include <ctype.h>     // For isspace
+#include <time.h>      // For time
 
-#define PORT 8080
-#define MAX_EVENTS 1000
-#define WORKER_THREADS 4
-#define BUFFER_SIZE 1024
-#define INITIAL_CAPACITY 101
-#define LOAD_FACTOR_THRESHOLD 0.75
+#define PORT 8080                   // Port to listen on
+#define MAX_EVENTS 1000             // Maximum number of events to process at once
+#define WORKER_THREADS 4            // Number of worker threads to create
+#define BUFFER_SIZE 1024            // Size of the read/write buffer
+#define INITIAL_CAPACITY 101        // Initial capacity of the hash table, start with a prime number
+#define LOAD_FACTOR_THRESHOLD 0.75  // Load factor threshold for resizing the hash table
 
-pthread_mutex_t store_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t store_mutex = PTHREAD_MUTEX_INITIALIZER; // Mutex for the hash table modifications in the concurrent worker threads
 
 // ======== Hash Table Definitions =========
 typedef struct Node {
@@ -34,9 +34,9 @@ typedef struct HashTable {
 } HashTable;
 
 // ======== Epoll Variables =========
-int epoll_fd;
-int server_socket;
-HashTable *global_table;
+int epoll_fd;                   // Epoll file descriptor
+int server_socket;              // Server socket file descriptor
+HashTable *global_table;        // Global hash table
 
 // ======== Utility Functions =========
 void set_nonblocking(int sock) {
@@ -66,6 +66,7 @@ void trim_newline(char *s) {
     }
 }
 
+// Create a new hash table with a given capacity.
 int create_table(size_t capacity) {
     global_table = malloc(sizeof(HashTable));
     if (!global_table) {
@@ -319,10 +320,10 @@ void read_client_data(int client_socket) {
                     const char *response = "All clean!\n";
                     send(client_socket, response, strlen(response), 0);
             } else {
-                write(client_socket, "Error: unknown command! Use write, search, dump, wipe or quit.\n", 24);
+                write(client_socket, "Error: unknown command! Use write, search, dump, wipe or quit.\n", 64);
             }
         } else {
-            write(client_socket, "Error: invalidcommand!Use write, search, dump, wipe or quit.\n", 24);
+            write(client_socket, "Error: invalid command! Use write, search, dump, wipe or quit.\n", 64);
         }
     }
 }
