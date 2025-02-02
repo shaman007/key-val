@@ -25,12 +25,14 @@ server: server.c
 	\$(CC) \$(CFLAGS) -o server server.c \$(LDFLAGS)
 
 client: test/client.c
-	\$(CC) \$(CFLAGS) -o test/client test/client.c  \$(LDFLAGS)
+	\$(CC) \$(CFLAGS) -o test/client test/client.c \$(LDFLAGS)
+
+all: server client
 
 # Clean target to remove the built executable
 clean:
 	@rm -f server
-    @rm -f test/client
+    @rm -f ./test/client
 .PHONY: clean
 EOF
 
