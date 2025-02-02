@@ -30,7 +30,7 @@ client: test/client.c
 # Clean target to remove the built executable
 clean:
 	@rm -f server
-
+    @rm -f test/client
 .PHONY: clean
 EOF
 

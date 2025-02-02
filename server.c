@@ -255,6 +255,7 @@ char *dump_store() {
 
 // ======== Read Client Data Function =========
 void read_client_data(int client_socket) {
+    printf("Reading data from client: %d\n", client_socket);
     char buffer[BUFFER_SIZE];
     while (1) {
         int bytes_read = read(client_socket, buffer, BUFFER_SIZE - 1);
@@ -331,6 +332,7 @@ void *worker_thread(void *arg) {
     struct epoll_event events[MAX_EVENTS];
 
     while (1) {
+        printf("Worker thread waiting for events...\n");
         int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
         if (num_events < 0) {
             perror("epoll_wait failed");

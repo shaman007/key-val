@@ -5,7 +5,7 @@
 #include <arpa/inet.h>
 #include <uuid/uuid.h>
 #include <time.h>
-
+#include <unistd.h>
 #define SERVER_IP "127.0.0.1"
 #define SERVER_PORT 8080
 #define BUFFER_SIZE 1024
@@ -19,13 +19,22 @@ void generate_random_string(char *str, size_t length) {
 }
 
 void send_command(int sockfd, const char *command) {
+    char response[BUFFER_SIZE];
+    printf("Sending121212: %s\n", command);
     send(sockfd, command, strlen(command), 0);
-    send(sockfd, "\n", 1, 0);
+    //send(sockfd, "\n", 1, 0);
+    
+    // Read server response
+    ssize_t bytes_received = recv(sockfd, response, BUFFER_SIZE - 1, 0);
+    printf("Bytes received: %ld\n", bytes_received);
+    if (bytes_received > 0) {
+        response[bytes_received] = '\0';
+        printf("Server response: %s\n", response);
+    }
 }
 
 void run_sequence(int sockfd, int num_writes) {
     char buffer[BUFFER_SIZE];
-    buffer[BUFFER_SIZE-1] = '\0';
     uuid_t uuid;
     char uuid_str[37];
 
@@ -37,7 +46,7 @@ void run_sequence(int sockfd, int num_writes) {
         char random_string[str_len + 1];
         generate_random_string(random_string, str_len);
 
-        snprintf(buffer, strlen(random_string)+strlen(uuid_str) + 128, "write %s %s\n", uuid_str, random_string);
+        snprintf(buffer, strlen(random_string)+strlen(uuid_str) + 128, "write %s %s", uuid_str, random_string);
         printf("Sending: %s\n", buffer);
         send_command(sockfd, buffer);
     }
@@ -77,7 +86,6 @@ int main(int argc, char *argv[]) {
 
     // First run with wipe
     run_sequence(sockfd, num_writes);
-
     close(sockfd);
     return EXIT_SUCCESS;
 }
