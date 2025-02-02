@@ -17,7 +17,7 @@ LDFLAGS = -lpthread
 
 # Target to build the server executable
 server: server.c
-	\$(CC) \$(CFLAGS) -o server server.c \$(LDFLAGS)
+	\$(CC) \$(CFLAGS) -o server server.c \$(LDFLAGS) -v
 
 # Clean target to remove the built executable
 clean:
