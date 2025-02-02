@@ -309,7 +309,13 @@ void read_client_data(int client_socket) {
                        send(client_socket, dump, strlen(dump), 0);
                        write(client_socket, "OK\n", 3);
                     } 
-            }  else if (strcasecmp(command, "wipe") == 0) {
+            } else if (strcasecmp(command, "size") == 0) {
+                char *response;
+                response = malloc(BUFFER_SIZE);
+                sprintf(response, "%zu\n", global_table->count);
+                send(client_socket, response, strlen(response), 0);
+            }
+             else if (strcasecmp(command, "wipe") == 0) {
                     free_table();
                     int error = create_table(INITIAL_CAPACITY);
                     if (error != 0) {
