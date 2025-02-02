@@ -22,10 +22,10 @@ LDFLAGS = -lpthread -luuid
 
 # Target to build the server executable
 server: server.c
-	\$(CC) \$(CFLAGS) -o server server.c \$(LDFLAGS)
+	$(CC) $(CFLAGS) -o server server.c $(LDFLAGS)
 
 client: test/client.c
-	\$(CC) \$(CFLAGS) -o test/client test/client.c \$(LDFLAGS)
+	$(CC) $(CFLAGS) -o test/client test/client.c $(LDFLAGS)
 
 all: server client
 

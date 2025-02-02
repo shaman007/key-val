@@ -20,4 +20,4 @@ jobs:
     - name: configure
       run: bash ./configure
     - name: make
-      run: make all
+      run: make
