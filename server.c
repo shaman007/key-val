@@ -259,8 +259,8 @@ void read_client_data(int client_socket) {
     char buffer[BUFFER_SIZE];
     while (1) {
         int bytes_read = read(client_socket, buffer, BUFFER_SIZE - 1);
-        buffer[bytes_read] = '\0';
-        trim_newline(buffer);  // Remove newline if present.
+        buffer[bytes_read] = '\0'; // Null-terminate the buffer.
+        trim_newline(buffer);      // Remove newline if present.
 
         if (bytes_read == -1) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
@@ -306,6 +306,7 @@ void read_client_data(int client_socket) {
                     if (!dump) {
                         const char *response = "Error: failed to dump store\n";
                         send(client_socket, response, strlen(response), 0);
+                        write(client_socket, "OK\n", 3);
                         continue;
                     } else{
                        send(client_socket, dump, strlen(dump), 0);
@@ -350,8 +351,8 @@ void *worker_thread(void *arg) {
 
 // ======== Main Function =========
 int main() {
-    struct sockaddr_in server_addr;
-    int opt = 1;
+    struct sockaddr_in server_addr; // Server address structure
+    int opt = 1;                    // For setsockopt reuseaddr option to avoid "Address already in use" error
 
     // Create server socket
     server_socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -386,16 +387,16 @@ int main() {
     }
 
     // Add server socket to epoll
-    struct epoll_event event;
-    event.events = EPOLLIN;
-    event.data.fd = server_socket;
+    struct epoll_event event;        // Event structure to add to epoll
+    event.events = EPOLLIN;          // Read event for the server socket
+    event.data.fd = server_socket;   // Server socket file descriptor
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_socket, &event) < 0) {
         perror("epoll_ctl server_socket failed");
         exit(1);
     }
 
     // Create worker threads
-    pthread_t threads[WORKER_THREADS];
+    pthread_t threads[WORKER_THREADS];         // Worker thread array
     for (int i = 0; i < WORKER_THREADS; i++) {
         pthread_create(&threads[i], NULL, worker_thread, NULL);
     }
