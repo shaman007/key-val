@@ -7,17 +7,25 @@ if ! echo -e "#include <pthread.h>\nint main() { return 0; }" | gcc -x c - -o /d
     exit 1
 fi
 
+# Check for uuid support
+if ! echo -e "#include <uuid/uuid.h>\nint main() { return 0; }" | gcc -x c - -o /dev/null -luuid 2>/dev/null; then
+    echo "Error: uuid library not found. Please install uuid development package."
+    exit 1
+fi
 cat << 'EOF' > Makefile
 # Auto-generated Makefile
 
 # Compiler and flags
 CC = gcc
 CFLAGS = -Wall -Wextra
-LDFLAGS = -lpthread
+LDFLAGS = -lpthread -luuid
 
 # Target to build the server executable
 server: server.c
 	\$(CC) \$(CFLAGS) -o server server.c \$(LDFLAGS)
+
+client: test/client.c
+	\$(CC) \$(CFLAGS) -o test/client test/client.c  \$(LDFLAGS)
 
 # Clean target to remove the built executable
 clean:

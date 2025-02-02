@@ -14,7 +14,7 @@
 #define MAX_EVENTS 1000             // Maximum number of events to process at once
 #define WORKER_THREADS 4            // Number of worker threads to create
 #define BUFFER_SIZE 1024            // Size of the read/write buffer
-#define INITIAL_CAPACITY 101        // Initial capacity of the hash table, start with a prime number
+#define INITIAL_CAPACITY 1023        // Initial capacity of the hash table, start with a prime number
 #define LOAD_FACTOR_THRESHOLD 0.75  // Load factor threshold for resizing the hash table
 
 pthread_mutex_t store_mutex = PTHREAD_MUTEX_INITIALIZER; // Mutex for the hash table modifications in the concurrent worker threads
@@ -191,7 +191,6 @@ void resize_table() {
             // Insert node into new bucket list.
             node->next = new_buckets[new_index];
             new_buckets[new_index] = node;
-
             node = next_node;
         }
     }
@@ -238,12 +237,12 @@ char *dump_store() {
         exit(EXIT_FAILURE);
     }
     dump[0] = '\0';  // Start with an empty string.
-
+    int increment = 0;
     for (size_t i = 0; i < global_table->capacity; i++) {
         Node *node = global_table->buckets[i];
         while (node) {
             char line[strlen(node->key) + strlen(node->value) + 32];
-            snprintf(line, sizeof(line), "%s: %s, %ld\n", node->key, node->value, node->created_at);
+            snprintf(line, sizeof(line), "%d: %s -- %s, %ld\n",increment++, node->key, node->value, node->created_at);
             dump = realloc(dump, strlen(dump) + strlen(line) + 1);
             strncat(dump, line, strlen(line));
             node = node->next;
@@ -276,8 +275,6 @@ void read_client_data(int client_socket) {
             return;
         }
 
-        buffer[bytes_read] = '\0';
-
         char command[16], key[256], value[768];
         int num_tokens = sscanf(buffer, "%15s %255s %767[^\n]", command, key, value);
 
@@ -306,10 +303,10 @@ void read_client_data(int client_socket) {
                     if (!dump) {
                         const char *response = "Error: failed to dump store\n";
                         send(client_socket, response, strlen(response), 0);
-                        write(client_socket, "OK\n", 3);
                         continue;
                     } else{
                        send(client_socket, dump, strlen(dump), 0);
+                       write(client_socket, "OK\n", 3);
                     } 
             }  else if (strcasecmp(command, "wipe") == 0) {
                     free_table();
@@ -341,6 +338,7 @@ void *worker_thread(void *arg) {
         }
 
         for (int i = 0; i < num_events; i++) {
+            printf("Processing event %d\n", i);
             int client_socket = events[i].data.fd;
             if (client_socket == server_socket) continue;
             read_client_data(client_socket);
