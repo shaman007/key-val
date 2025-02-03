@@ -93,7 +93,6 @@ Node *create_node(const char *key, const char *value) {
         perror("Failed to allocate node");
         exit(EXIT_FAILURE);
     }
-    new_node->key = malloc(strlen(key) + 1);
     new_node->key = strdup(key);
     if (!new_node->key) {
         perror("Failed to allocate key string");
@@ -101,7 +100,6 @@ Node *create_node(const char *key, const char *value) {
         free(new_node);
         exit(EXIT_FAILURE);
     }
-    new_node->value = malloc(strlen(value) + 1);
     new_node->value = strdup(value);
     if (!new_node->value) {
         perror("Failed to allocate value string");
@@ -133,7 +131,6 @@ int insert(const char *key, const char *value) {
         if (strcmp(curr->key, key) == 0) {
             // Replace the existing value.
             free(curr->value);
-            curr->value = malloc(strlen(value) + 1);
             curr->value = strdup(value);
             if (!curr->value) {
                 perror("Failed to allocate new value string");
@@ -210,7 +207,7 @@ int *delete(const char *key) {
 // Resize the hash table to a new capacity.
 void resize_table() {
     size_t old_capacity = global_table->capacity;
-    size_t new_capacity = old_capacity * 2 + 1;  // Example growth strategy.
+    size_t new_capacity = old_capacity * 2;  // Growth strategy is simple.
     Node **new_buckets = calloc(new_capacity, sizeof(Node *));
     if (!new_buckets) {
         perror("Failed to allocate new buckets during resize");
