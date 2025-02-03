@@ -2,7 +2,7 @@
 
 ## About
 
-Simple server in C that sits at 8080 port, serves like in-memory key-value db. It has 5 commands:
+Simple server in C that sits at 8080 port, serves like in-memory key-value db. It has folowing commands:
 
 * "write key value" writes or overwrites key with value, saving timestamp
 * "search key" searches value by the key
