@@ -1,21 +1,22 @@
-#include <stdio.h>     // For printf, perror, snprintf
-#include <stdlib.h>    // For malloc, calloc, realloc, free, exit
-#include <string.h>    // For strlen, strcmp, strdup, strtok, strncat, snprintf
-#include <unistd.h>    // For close, read, write
-#include <arpa/inet.h> // For sockaddr_in, inet_ntoa
-#include <fcntl.h>     // For fcntl
-#include <sys/epoll.h> // For epoll_create1, epoll_ctl, struct epoll_event
-#include <pthread.h>   // For pthread_create, pthread_mutex_t
-#include <errno.h>     // For EAGAIN, EWOULDBLOCK
-#include <ctype.h>     // For isspace
-#include <time.h>      // For time
+#include <stdio.h>                  // For printf, perror, snprintf
+#include <stdlib.h>                 // For malloc, calloc, realloc, free, exit
+#include <string.h>                 // For strlen, strcmp, strdup, strtok, strncat, snprintf
+#include <unistd.h>                 // For close, read, write
+#include <arpa/inet.h>              // For sockaddr_in, inet_ntoa
+#include <fcntl.h>                  // For fcntl
+#include <sys/epoll.h>              // For epoll_create1, epoll_ctl, struct epoll_event
+#include <pthread.h>                // For pthread_create, pthread_mutex_t
+#include <errno.h>                  // For EAGAIN, EWOULDBLOCK
+#include <ctype.h>                  // For isspace
+#include <time.h>                   // For time
 
 #define PORT 8080                   // Port to listen on
 #define MAX_EVENTS 1000             // Maximum number of events to process at once
 #define WORKER_THREADS 4            // Number of worker threads to create
 #define BUFFER_SIZE 1024            // Size of the read/write buffer
-#define INITIAL_CAPACITY 1023        // Initial capacity of the hash table, start with a prime number
+#define INITIAL_CAPACITY 1023       // Initial capacity of the hash table, start with a prime number
 #define LOAD_FACTOR_THRESHOLD 0.75  // Load factor threshold for resizing the hash table
+#define MAX_TTL 31536000            // Maximum time-to-live for a key-value pair in seconds
 
 pthread_mutex_t store_mutex = PTHREAD_MUTEX_INITIALIZER; // Mutex for the hash table modifications in the concurrent worker threads
 
@@ -24,6 +25,7 @@ typedef struct Node {
     char *key;
     char *value;
     time_t created_at;
+    int ttl;
     struct Node *next;
 } Node;
 
