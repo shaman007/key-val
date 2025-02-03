@@ -312,7 +312,7 @@ void read_client_data(int client_socket) {
             } else if (strcasecmp(command, "size") == 0) {
                 char *response;
                 response = malloc(BUFFER_SIZE);
-                sprintf(response, "%zu\n", global_table->count);
+                sprintf(response, "%zu, %zu\n", global_table->count, global_table->capacity);
                 send(client_socket, response, strlen(response), 0);
             }
              else if (strcasecmp(command, "wipe") == 0) {

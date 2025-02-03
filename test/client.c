@@ -20,7 +20,7 @@ void generate_random_string(char *str, size_t length) {
 
 void send_command(int sockfd, const char *command) {
     char response[BUFFER_SIZE];
-    printf("Sending121212: %s\n", command);
+    printf("Sending: %s\n", command);
     send(sockfd, command, strlen(command), 0);
     //send(sockfd, "\n", 1, 0);
     
