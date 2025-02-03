@@ -171,6 +171,40 @@ Node *search(const char *key) {
     return NULL;
 }
 
+// Delete a key from the hash table. Returns 1 if the key was found and deleted, -1 otherwise.
+int *delete(const char *key) {
+    Node *delete_node = search(key);
+    if (delete_node == NULL) {
+        return -1;
+    } else
+    {
+        pthread_mutex_lock(&store_mutex);
+        unsigned long index = hash(key) % global_table->capacity;
+        Node *node = global_table->buckets[index];
+        Node *prev = NULL;
+        while (node) {
+            if (strcmp(node->key, key) == 0) {
+                if (prev) {
+                    prev->next = node->next;
+                } else {
+                    global_table->buckets[index] = node->next;
+                }
+                free(node->key);
+                free(node->value);
+                free(node);
+                global_table->count--;
+                pthread_mutex_unlock(&store_mutex);
+                return 1;
+            }
+            prev = node;
+            node = node->next;
+        }
+        pthread_mutex_unlock(&store_mutex);
+        return -1;
+    }
+}
+
+
 // Resize the hash table to a new capacity.
 void resize_table() {
     size_t old_capacity = global_table->capacity;
@@ -314,8 +348,7 @@ void read_client_data(int client_socket) {
                 response = malloc(BUFFER_SIZE);
                 sprintf(response, "%zu, %zu\n", global_table->count, global_table->capacity);
                 send(client_socket, response, strlen(response), 0);
-            }
-             else if (strcasecmp(command, "wipe") == 0) {
+            } else if (strcasecmp(command, "wipe") == 0) {
                     free_table();
                     int error = create_table(INITIAL_CAPACITY);
                     if (error != 0) {
@@ -324,11 +357,18 @@ void read_client_data(int client_socket) {
                     }
                     const char *response = "All clean!\n";
                     send(client_socket, response, strlen(response), 0);
+            } else if (strcasecmp(command, "delete") == 0 && num_tokens == 2) {
+                int result = delete(key);
+                if (result == 1) {
+                    write(client_socket, "OK\n", 3);
+                } else {
+                    write(client_socket, "Not found\n", 10);
+                }
             } else {
-                write(client_socket, "Error: unknown command! Use write, search, dump, wipe or quit.\n", 64);
+                write(client_socket, "Error: unknown command! Use write, search, dump, delete, size, wipe or quit.\n", 128);
             }
         } else {
-            write(client_socket, "Error: invalid command! Use write, search, dump, wipe or quit.\n", 64);
+            write(client_socket, "Error: invalid command! Use write, search, dump, delete, size, wipe or quit.\n", 128);
         }
     }
 }
