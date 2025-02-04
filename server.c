@@ -266,7 +266,11 @@ void free_table() {
 
 
 // Dump the contents of the hash table as a string.
-char *dump_store() {
+char *dump_store(size_t index, size_t offset) {
+    if (index >= global_table->capacity || index + offset >= global_table->capacity) {
+        perror("Invalid index or offset");
+        return NULL;
+    }
     pthread_mutex_lock(&store_mutex);
     char *dump = malloc(1);
     if (!dump) {
@@ -275,11 +279,11 @@ char *dump_store() {
     }
     dump[0] = '\0';  // Start with an empty string.
     int increment = 0;
-    for (size_t i = 0; i < global_table->capacity; i++) {
+    for (size_t i = index; i < index+offset; i++) {
         Node *node = global_table->buckets[i];
         while (node) {
             char line[strlen(node->key) + strlen(node->value) + 64];
-            snprintf(line, sizeof(line), "%d: %s -- %s, %ld, index: %ld\n",increment++, node->key, node->value, node->created_at, node->hash % global_table->capacity);
+            snprintf(line, sizeof(line), "%d: %s -- %s;\n bucket: %ld; timestamp: %ld; index: %ld\n\n",increment++, node->key, node->value, i, node->created_at, node->hash % global_table->capacity);
             dump = realloc(dump, strlen(dump) + strlen(line) + 1);
             strncat(dump, line, strlen(line));
             node = node->next;
@@ -336,8 +340,16 @@ void read_client_data(int client_socket) {
                     send(client_socket, response, strlen(response), 0);
                     close(client_socket);
                     break;
-            }  else if (strcasecmp(command, "dump") == 0) {
-                    char *dump = dump_store();
+            }  else if (strcasecmp(command, "dump" ) == 0 ) {
+                    size_t index, offset;
+                    if (num_tokens != 3) {
+                        index = 0;
+                        offset = 512;
+                    } else{
+                        index = atoi(key);
+                        offset = atoi(value);
+                    }
+                    char *dump = dump_store(index, offset);
                     if (!dump) {
                         const char *response = "Error: failed to dump store\n";
                         send(client_socket, response, strlen(response), 0);

@@ -48,7 +48,7 @@ void run_sequence(int sockfd, int num_writes) {
         uuid_generate(uuid);
         uuid_unparse(uuid, uuid_str);
 
-        int str_len = (rand() % 64) + 1;
+        int str_len = (rand() % 512) + 1;
         char random_string[str_len + 1];
         generate_random_string(random_string, str_len);
 
