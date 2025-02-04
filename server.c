@@ -25,7 +25,7 @@ typedef struct Node {
     char *key;
     char *value;
     time_t created_at;
-    int ttl;
+    unsigned long ttl;
     unsigned long hash;
     struct Node *next;
 } Node;
@@ -78,7 +78,7 @@ int create_table(size_t capacity) {
     }
     global_table->capacity = capacity;
     global_table->count = 0;
-    global_table->buckets = calloc(global_table->capacity, sizeof(Node *));
+    global_table->buckets = malloc(global_table->capacity * sizeof(Node *));
     if (!global_table->buckets) {
         perror("Failed to allocate buckets");
         free(global_table);
@@ -118,7 +118,7 @@ Node *create_node(const char *key, const char *value, unsigned long h) {
 void resize_table();
 
 // Insert a key-value pair into the hash table.
-int insert(const char *key, const char *value) {
+int insert(const char *key, const char *value, int type) {
     pthread_mutex_lock(&store_mutex);
     // Check if we need to resize before inserting.
     double load_factor = (double)global_table->count / global_table->capacity;
@@ -132,27 +132,39 @@ int insert(const char *key, const char *value) {
     // Check if the key already exists; if so, update its value.
     for (Node *curr = head; curr != NULL; curr = curr->next) {
         if (strcmp(curr->key, key) == 0) {
-            // Replace the existing value.
-            free(curr->value);
-            curr->value = strdup(value);
-            if (!curr->value) {
-                perror("Failed to allocate new value string");
-                exit(EXIT_FAILURE);
+            // Replace the existing value, if it's not 'add' operation.
+            if (type !=2)
+            {
+                free(curr->value);
+                curr->value = strdup(value);
+                if (!curr->value) {
+                    perror("Failed to allocate new value string");
+                    exit(EXIT_FAILURE);
+                }
+                curr->created_at = time(NULL);
+                pthread_mutex_unlock(&store_mutex);
+                return 1;
+            } else {
+                pthread_mutex_unlock(&store_mutex);
+                return -1;
             }
-            curr->created_at = time(NULL);
-            pthread_mutex_unlock(&store_mutex);
-            return 1;
         }
     }
 
     // Key not found; create a new node and insert at the beginning.
-    Node *new_node = create_node(key, value, h);
-    new_node->created_at = time(NULL);
-    new_node->next = head;
-    global_table->buckets[index] = new_node;
-    global_table->count++;
-    pthread_mutex_unlock(&store_mutex);
-    return 1;
+    if (type != 1)
+    {
+        Node *new_node = create_node(key, value, h);
+        new_node->created_at = time(NULL);
+        new_node->next = head;
+        global_table->buckets[index] = new_node;
+        global_table->count++;
+        pthread_mutex_unlock(&store_mutex);
+        return 1;
+    } else {
+        pthread_mutex_unlock(&store_mutex);
+        return -1;
+    }
 }
 
 // Search for a key in the hash table. Returns the value string if found,
@@ -212,7 +224,7 @@ int delete(const char *key) {
 void resize_table() {
     size_t old_capacity = global_table->capacity;
     size_t new_capacity = old_capacity * 2;  // Growth strategy is simple.
-    Node **new_buckets = calloc(new_capacity, sizeof(Node *));
+    Node **new_buckets = malloc(new_capacity * sizeof(Node *));
     if (!new_buckets) {
         perror("Failed to allocate new buckets during resize");
         exit(EXIT_FAILURE);
@@ -322,8 +334,23 @@ void read_client_data(int client_socket) {
 
         if (num_tokens >= 1) {
             if (strcasecmp(command, "write") == 0 && num_tokens == 3) {
-                insert(key, value);
+                if (insert(key, value, 0) == 1) {
                 write(client_socket, "OK\n", 3);
+                } else {
+                    write(client_socket, "Error: failed to write\n", 23);
+                }
+            } else if (strcasecmp(command, "update") == 0 && num_tokens == 3) {
+                if (insert(key, value, 1) == 1) {
+                    write(client_socket, "OK\n", 3);
+                } else {
+                    write(client_socket, "Error: failed to update, key not found\n", 39);
+                }
+            } else if (strcasecmp(command, "add") == 0 && num_tokens == 3) {
+                if (insert(key, value, 2) == 1) {
+                    write(client_socket, "OK\n", 3);
+                } else {
+                    write(client_socket, "Error: failed to add, key exists\n", 33);
+                }
             } else if (strcasecmp(command, "search") == 0 && num_tokens == 2) {
                 Node *found = search(key);
                 if (found) {
@@ -344,7 +371,7 @@ void read_client_data(int client_socket) {
                     size_t index, offset;
                     if (num_tokens != 3) {
                         index = 0;
-                        offset = 512;
+                        offset = 1022;
                     } else{
                         index = atoi(key);
                         offset = atoi(value);
@@ -467,6 +494,7 @@ int main() {
         perror("Failed to create hash table");
         exit(1);
     }
+
     while (1) {
         struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
