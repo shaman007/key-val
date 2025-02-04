@@ -9,6 +9,7 @@
 #define SERVER_IP "127.0.0.1"
 #define SERVER_PORT 8080
 #define BUFFER_SIZE 1024
+#define DEBUG
 
 void generate_random_string(char *str, size_t length) {
     static const char charset[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -20,16 +21,21 @@ void generate_random_string(char *str, size_t length) {
 
 void send_command(int sockfd, const char *command) {
     char response[BUFFER_SIZE];
+#ifdef DEBUG
     printf("Sending: %s\n", command);
+#endif
     send(sockfd, command, strlen(command), 0);
-    //send(sockfd, "\n", 1, 0);
     
     // Read server response
     ssize_t bytes_received = recv(sockfd, response, BUFFER_SIZE - 1, 0);
+#ifdef DEBUG
     printf("Bytes received: %ld\n", bytes_received);
+#endif
     if (bytes_received > 0) {
         response[bytes_received] = '\0';
+#ifdef DEBUG
         printf("Server response: %s\n", response);
+#endif
     }
 }
 
@@ -47,7 +53,6 @@ void run_sequence(int sockfd, int num_writes) {
         generate_random_string(random_string, str_len);
 
         snprintf(buffer, strlen(random_string)+strlen(uuid_str) + 128, "write %s %s", uuid_str, random_string);
-        printf("Sending: %s\n", buffer);
         send_command(sockfd, buffer);
     }
 

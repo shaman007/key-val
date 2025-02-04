@@ -127,7 +127,6 @@ int insert(const char *key, const char *value) {
     }
     unsigned long h = hash(key);
     unsigned long index = h % global_table->capacity;
-    printf("Insert index: %ld\n", index);
     Node *head = global_table->buckets[index];
 
     // Check if the key already exists; if so, update its value.
@@ -162,7 +161,6 @@ Node *search(const char *key) {
     pthread_mutex_lock(&store_mutex);
     unsigned long h = hash(key);
     unsigned long index = h % global_table->capacity;
-    printf("Index: %ld\n", index);
     Node *node = global_table->buckets[index];
     while (node) {
         if (node->hash == h && strcmp(node->key, key) == 0) {
@@ -176,18 +174,19 @@ Node *search(const char *key) {
 }
 
 // Delete a key from the hash table. Returns 1 if the key was found and deleted, -1 otherwise.
-int *delete(const char *key) {
+int delete(const char *key) {
     Node *delete_node = search(key);
     if (delete_node == NULL) {
         return -1;
     } else
     {
         pthread_mutex_lock(&store_mutex);
-        unsigned long index = hash(key) % global_table->capacity;
+        unsigned long h = hash(key);
+        unsigned long index = h % global_table->capacity;
         Node *node = global_table->buckets[index];
         Node *prev = NULL;
         while (node) {
-            if (strcmp(node->key, key) == 0) {
+            if (node->hash == h && strcmp(node->key, key) == 0) {
                 if (prev) {
                     prev->next = node->next;
                 } else {
@@ -293,7 +292,7 @@ char *dump_store() {
 
 // ======== Read Client Data Function =========
 void read_client_data(int client_socket) {
-    printf("Reading data from client: %d\n", client_socket);
+    //printf("Reading data from client: %d\n", client_socket);
     char buffer[BUFFER_SIZE];
     while (1) {
         int bytes_read = read(client_socket, buffer, BUFFER_SIZE - 1);
@@ -369,20 +368,20 @@ void read_client_data(int client_socket) {
                     write(client_socket, "Not found\n", 10);
                 }
             } else {
-                write(client_socket, "Error: unknown command! Use write, search, dump, delete, size, wipe or quit.\n", 68);
+                write(client_socket, "Error: unknown command! Use write, search, dump, delete, size, wipe or quit.\n", 78);
             }
         } else {
-            write(client_socket, "Error: invalid command! Use write, search, dump, delete, size, wipe or quit.\n", 68);
+            write(client_socket, "Error: invalid command! Use write, search, dump, delete, size, wipe or quit.\n", 78);
         }
     }
 }
 
 // ======== Worker Thread Function =========
-void *worker_thread(void *arg) {
+void *worker_thread() {
     struct epoll_event events[MAX_EVENTS];
 
     while (1) {
-        printf("Worker thread waiting for events...\n");
+        //printf("Worker thread waiting for events...\n");
         int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
         if (num_events < 0) {
             perror("epoll_wait failed");
@@ -390,7 +389,7 @@ void *worker_thread(void *arg) {
         }
 
         for (int i = 0; i < num_events; i++) {
-            printf("Processing event %d\n", i);
+            //printf("Processing event %d\n", i);
             int client_socket = events[i].data.fd;
             if (client_socket == server_socket) continue;
             read_client_data(client_socket);
