@@ -26,6 +26,7 @@ typedef struct Node {
     char *value;
     time_t created_at;
     int ttl;
+    unsigned long hash;
     struct Node *next;
 } Node;
 
@@ -87,7 +88,7 @@ int create_table(size_t capacity) {
 }
 
 // Create a new node with key and value.
-Node *create_node(const char *key, const char *value) {
+Node *create_node(const char *key, const char *value, unsigned long h) {
     Node *new_node = malloc(sizeof(Node));
     if (!new_node) {
         perror("Failed to allocate node");
@@ -107,6 +108,8 @@ Node *create_node(const char *key, const char *value) {
         free(new_node);
         exit(EXIT_FAILURE);
     }
+    new_node->ttl = MAX_TTL;
+    new_node->hash = h;
     new_node->next = NULL;
     return new_node;
 }
@@ -122,8 +125,9 @@ int insert(const char *key, const char *value) {
     if (load_factor > LOAD_FACTOR_THRESHOLD) {
         resize_table(global_table);
     }
-
-    unsigned long index = hash(key) % global_table->capacity;
+    unsigned long h = hash(key);
+    unsigned long index = h % global_table->capacity;
+    printf("Insert index: %ld\n", index);
     Node *head = global_table->buckets[index];
 
     // Check if the key already exists; if so, update its value.
@@ -143,7 +147,7 @@ int insert(const char *key, const char *value) {
     }
 
     // Key not found; create a new node and insert at the beginning.
-    Node *new_node = create_node(key, value);
+    Node *new_node = create_node(key, value, h);
     new_node->created_at = time(NULL);
     new_node->next = head;
     global_table->buckets[index] = new_node;
@@ -156,11 +160,12 @@ int insert(const char *key, const char *value) {
 // or NULL if the key does not exist.
 Node *search(const char *key) {
     pthread_mutex_lock(&store_mutex);
-    unsigned long index = hash(key) % global_table->capacity;
+    unsigned long h = hash(key);
+    unsigned long index = h % global_table->capacity;
     printf("Index: %ld\n", index);
     Node *node = global_table->buckets[index];
     while (node) {
-        if (strcmp(node->key, key) == 0) {
+        if (node->hash == h && strcmp(node->key, key) == 0) {
             pthread_mutex_unlock(&store_mutex);
             return node;
         }
@@ -220,7 +225,7 @@ void resize_table() {
         while (node) {
             Node *next_node = node->next; // Save next pointer.
 
-            unsigned long new_index = hash(node->key) % new_capacity;
+            unsigned long new_index = node->hash % new_capacity;
             // Insert node into new bucket list.
             node->next = new_buckets[new_index];
             new_buckets[new_index] = node;
@@ -274,8 +279,8 @@ char *dump_store() {
     for (size_t i = 0; i < global_table->capacity; i++) {
         Node *node = global_table->buckets[i];
         while (node) {
-            char line[strlen(node->key) + strlen(node->value) + 32];
-            snprintf(line, sizeof(line), "%d: %s -- %s, %ld\n",increment++, node->key, node->value, node->created_at);
+            char line[strlen(node->key) + strlen(node->value) + 64];
+            snprintf(line, sizeof(line), "%d: %s -- %s, %ld, index: %ld\n",increment++, node->key, node->value, node->created_at, node->hash % global_table->capacity);
             dump = realloc(dump, strlen(dump) + strlen(line) + 1);
             strncat(dump, line, strlen(line));
             node = node->next;
@@ -364,10 +369,10 @@ void read_client_data(int client_socket) {
                     write(client_socket, "Not found\n", 10);
                 }
             } else {
-                write(client_socket, "Error: unknown command! Use write, search, dump, delete, size, wipe or quit.\n", 128);
+                write(client_socket, "Error: unknown command! Use write, search, dump, delete, size, wipe or quit.\n", 68);
             }
         } else {
-            write(client_socket, "Error: invalid command! Use write, search, dump, delete, size, wipe or quit.\n", 128);
+            write(client_socket, "Error: invalid command! Use write, search, dump, delete, size, wipe or quit.\n", 68);
         }
     }
 }
