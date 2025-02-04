@@ -371,7 +371,7 @@ void read_client_data(int client_socket) {
                     size_t index, offset;
                     if (num_tokens != 3) {
                         index = 0;
-                        offset = 1022;
+                        offset = INITIAL_CAPACITY - 1;
                     } else{
                         index = atoi(key);
                         offset = atoi(value);
