@@ -23,8 +23,11 @@ Hash table, that stores key, it's hash, value and creation timestamp in a bucket
 * Keys expiraction on access
 * Configfile, cli keys
 * Persistence (yet need to choose strategy, Periodic Snapshots + WAL maybe?)
-* Simple master-master replication with Last-Write-Wins (LWW) strategy.
+* Simple master-master replication with Last-Write-Wins (LWW) strategy
+* Dokerise
+* Test automations
+* Consistent logging.
 
 ## Known problems
 
-* if client don't read socket but spams commands, servers segfaults
+* if client don't read socket but spams commands, servers segfaults. Yeah, that's the big one problem.
