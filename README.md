@@ -21,6 +21,7 @@ Hash table, that stores key, it's hash, value and creation timestamp in a bucket
 ## ToDo
 
 * Keys expiraction on access
+* Configfile, cli keys
 * Persistence (yet need to choose strategy, Periodic Snapshots + WAL maybe?)
 * Simple master-master replication with Last-Write-Wins (LWW) strategy.
 
