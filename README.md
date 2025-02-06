@@ -18,6 +18,12 @@ Simple server in C that sits at 8080 port, serves like in-memory key-value db. I
 
 Hash table, that stores key, it's hash, value and creation timestamp in a buckets linked to the table row.
 
+## ToDo
+
+* Keys expiraction on access
+* Persistence (yet need to choose strategy, Periodic Snapshots + WAL maybe?)
+* Simple master-master replication with Last-Write-Wins (LWW) strategy.
+
 ## Known problems
 
 * if client don't read socket but spams commands, servers segfaults
