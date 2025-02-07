@@ -52,7 +52,7 @@ void run_sequence(int sockfd, int num_writes) {
         char random_string[str_len + 1];
         generate_random_string(random_string, str_len);
 
-        snprintf(buffer, strlen(random_string)+strlen(uuid_str) + 128, "write %s %s", uuid_str, random_string);
+        snprintf(buffer, strlen(random_string)+strlen(uuid_str) + 128, "write %s %s 15", uuid_str, random_string);
         send_command(sockfd, buffer);
     }
 

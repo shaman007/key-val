@@ -4,9 +4,9 @@
 
 Simple server in C that sits at 8080 port, serves like in-memory key-value db. It has folowing commands:
 
-* "write key value" writes or overwrites key with value, saving timestamp
-* "add key value"  writes key with value, saving timestamp, but not overwrites it
-* "update key value" overwrites key with value, saving timestamp, but not add it
+* "write key value ttl" writes or overwrites key with value, saving timestamp, ttl optional
+* "add key value ttl"  writes key with value, saving timestamp, but not overwrites it, ttl optional
+* "update key value ttl" overwrites key with value, saving timestamp, but not add it, ttl optional
 * "search key" searches value by the key
 * "dump index offset" dupms what is in table from index to offset, if there are buckets there. Just "dump" returns first INITIAL_CAPACITY indexes.
 * "wipe" drops everyting
@@ -20,7 +20,6 @@ Hash table, that stores key, it's hash, value and creation timestamp in a bucket
 
 ## ToDo
 
-* Keys expiraction on access
 * Configfile, cli keys
 * Persistence (yet need to choose strategy, Periodic Snapshots + WAL maybe?)
 * Simple master-master replication with Last-Write-Wins (LWW) strategy

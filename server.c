@@ -25,7 +25,7 @@ typedef struct Node {
     char *key;
     char *value;
     time_t created_at;
-    unsigned long ttl;
+    time_t ttl;
     unsigned long hash;
     struct Node *next;
 } Node;
@@ -118,7 +118,7 @@ Node *create_node(const char *key, const char *value, unsigned long h) {
 void resize_table();
 
 // Insert a key-value pair into the hash table.
-int insert(const char *key, const char *value, int type) {
+int insert(const char *key, const char *value, size_t ttl, int type) {
     pthread_mutex_lock(&store_mutex);
     // Check if we need to resize before inserting.
     double load_factor = (double)global_table->count / global_table->capacity;
@@ -137,6 +137,7 @@ int insert(const char *key, const char *value, int type) {
             {
                 free(curr->value);
                 curr->value = strdup(value);
+                curr->ttl = ttl;
                 if (!curr->value) {
                     perror("Failed to allocate new value string");
                     exit(EXIT_FAILURE);
@@ -156,6 +157,7 @@ int insert(const char *key, const char *value, int type) {
     {
         Node *new_node = create_node(key, value, h);
         new_node->created_at = time(NULL);
+        new_node->ttl = ttl;
         new_node->next = head;
         global_table->buckets[index] = new_node;
         global_table->count++;
@@ -167,6 +169,8 @@ int insert(const char *key, const char *value, int type) {
     }
 }
 
+int delete(const char *key);
+
 // Search for a key in the hash table. Returns the value string if found,
 // or NULL if the key does not exist.
 Node *search(const char *key) {
@@ -174,11 +178,27 @@ Node *search(const char *key) {
     unsigned long h = hash(key);
     unsigned long index = h % global_table->capacity;
     Node *node = global_table->buckets[index];
+    Node *prev = NULL;
     while (node) {
-        if (node->hash == h && strcmp(node->key, key) == 0) {
+        if (node->hash == h && strcmp(node->key, key) == 0 && (time(NULL) - node->created_at) < node->ttl) {
+            printf("%ld, %ld\n", time(NULL) - node->created_at, node->ttl);
             pthread_mutex_unlock(&store_mutex);
             return node;
+        }else if (node->hash == h && strcmp(node->key, key) == 0 && (time(NULL) - node->created_at) >= node->ttl) {
+            // This block basically do part of delete(), but without strings comparison since we already have the node to delete
+            if (prev) {
+                    prev->next = node->next;
+                } else {
+                    global_table->buckets[index] = node->next;
+                }
+            free(node->key);
+            free(node->value);
+            free(node);
+            global_table->count--;
+            pthread_mutex_unlock(&store_mutex);
+            return NULL;              
         }
+        prev = node;
         node = node->next;
     }
     pthread_mutex_unlock(&store_mutex);
@@ -276,6 +296,35 @@ void free_table() {
     pthread_mutex_unlock(&store_mutex);
 };
 
+void garbage_collect() {
+    pthread_mutex_lock(&store_mutex);
+    for (size_t i = 0; i < global_table->capacity; i++) {
+        Node *node = global_table->buckets[i];
+        Node *prev = NULL;
+        while (node) {
+            if (node->ttl < (time(NULL) - node->created_at)) {
+                if (prev) {
+                    prev->next = node->next;
+                } else {
+                    global_table->buckets[i] = node->next;
+                }
+                free(node->key);
+                free(node->value);
+                free(node);
+                if (prev) {
+                    node = prev->next;
+                } else {
+                    node = global_table->buckets[i];
+                }
+                global_table->count--;
+            } else {
+                prev = node;
+                node = node->next;
+            }
+        }
+    }
+    pthread_mutex_unlock(&store_mutex);
+}
 
 // Dump the contents of the hash table as a string.
 char *dump_store(size_t index, size_t offset) {
@@ -283,6 +332,7 @@ char *dump_store(size_t index, size_t offset) {
         perror("Invalid index or offset");
         return NULL;
     }
+    garbage_collect();
     pthread_mutex_lock(&store_mutex);
     char *dump = malloc(1);
     if (!dump) {
@@ -294,11 +344,11 @@ char *dump_store(size_t index, size_t offset) {
     for (size_t i = index; i < index+offset; i++) {
         Node *node = global_table->buckets[i];
         while (node) {
-            char line[strlen(node->key) + strlen(node->value) + 64];
-            snprintf(line, sizeof(line), "%d: %s -- %s;\n bucket: %ld; timestamp: %ld; index: %ld\n\n",increment++, node->key, node->value, i, node->created_at, node->hash % global_table->capacity);
-            dump = realloc(dump, strlen(dump) + strlen(line) + 1);
-            strncat(dump, line, strlen(line));
-            node = node->next;
+                char line[strlen(node->key) + strlen(node->value) + 64];
+                snprintf(line, sizeof(line), "%d: %s -- %s;\n bucket: %ld; timestamp: %ld; index: %ld\n\n",increment++, node->key, node->value, i, node->created_at, node->hash % global_table->capacity);
+                dump = realloc(dump, strlen(dump) + strlen(line) + 1); //this is stupid, I will do it better eventually
+                strncat(dump, line, strlen(line));
+                node = node->next;
         }
     }
     pthread_mutex_unlock(&store_mutex);
@@ -329,24 +379,31 @@ void read_client_data(int client_socket) {
             return;
         }
 
-        char command[16], key[256], value[768];
-        int num_tokens = sscanf(buffer, "%15s %255s %767[^\n]", command, key, value);
+        char command[16], key[256], value[768], ttl[32];
+        size_t ttl_val = 0;
+        int num_tokens = sscanf(buffer, "%15s %255s %767s %32[^\n]", command, key, value, ttl);
 
         if (num_tokens >= 1) {
-            if (strcasecmp(command, "write") == 0 && num_tokens == 3) {
-                if (insert(key, value, 0) == 1) {
-                write(client_socket, "OK\n", 3);
+            if (num_tokens == 4)
+            { 
+                ttl_val = atoi(ttl);
+            } else {
+                ttl_val = MAX_TTL;
+            }
+            if (strcasecmp(command, "write") == 0 && num_tokens >= 3) {
+                if (insert(key, value, ttl_val, 0) == 1) {
+                    write(client_socket, "OK\n", 3);
                 } else {
                     write(client_socket, "Error: failed to write\n", 23);
                 }
-            } else if (strcasecmp(command, "update") == 0 && num_tokens == 3) {
-                if (insert(key, value, 1) == 1) {
+            } else if (strcasecmp(command, "update") == 0 && num_tokens >= 3) {
+                if (insert(key, value, ttl_val, 1) == 1) {
                     write(client_socket, "OK\n", 3);
                 } else {
                     write(client_socket, "Error: failed to update, key not found\n", 39);
                 }
-            } else if (strcasecmp(command, "add") == 0 && num_tokens == 3) {
-                if (insert(key, value, 2) == 1) {
+            } else if (strcasecmp(command, "add") == 0 && num_tokens >= 3) {
+                if (insert(key, value, ttl_val, 2) == 1) {
                     write(client_socket, "OK\n", 3);
                 } else {
                     write(client_socket, "Error: failed to add, key exists\n", 33);
@@ -386,6 +443,7 @@ void read_client_data(int client_socket) {
                        write(client_socket, "OK\n", 3);
                     } 
             } else if (strcasecmp(command, "size") == 0) {
+                garbage_collect();
                 char *response;
                 response = malloc(BUFFER_SIZE);
                 sprintf(response, "%zu, %zu\n", global_table->count, global_table->capacity);
