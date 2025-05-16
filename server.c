@@ -89,7 +89,7 @@ int create_table(size_t capacity) {
 
 // Create a new node with key and value.
 Node *create_node(const char *key, const char *value, unsigned long h) {
-    Node *new_node = malloc(sizeof(Node));
+    Node *new_node = calloc(1, sizeof(Node));
     if (!new_node) {
         perror("Failed to allocate node");
         exit(EXIT_FAILURE);
@@ -97,20 +97,21 @@ Node *create_node(const char *key, const char *value, unsigned long h) {
     new_node->key = strdup(key);
     if (!new_node->key) {
         perror("Failed to allocate key string");
-        free(new_node->key);
         free(new_node);
         exit(EXIT_FAILURE);
     }
     new_node->value = strdup(value);
     if (!new_node->value) {
         perror("Failed to allocate value string");
-        free(new_node->value);
+        free(new_node->key);
         free(new_node);
         exit(EXIT_FAILURE);
     }
     new_node->ttl = MAX_TTL;
     new_node->hash = h;
+    new_node->created_at = time(NULL);
     new_node->next = NULL;
+
     return new_node;
 }
 
@@ -242,11 +243,13 @@ int delete(const char *key) {
 
 // Resize the hash table to a new capacity.
 void resize_table() {
+    pthread_mutex_lock(&store_mutex);
     size_t old_capacity = global_table->capacity;
-    size_t new_capacity = old_capacity * 2;  // Growth strategy is simple.
-    Node **new_buckets = malloc(new_capacity * sizeof(Node *));
+    size_t new_capacity = old_capacity * 3;  // Growth strategy is simple.
+    Node **new_buckets = calloc(new_capacity * sizeof(Node *));
     if (!new_buckets) {
         perror("Failed to allocate new buckets during resize");
+        pthread_mutex_unlock(&store_mutex);
         exit(EXIT_FAILURE);
     }
 
@@ -271,10 +274,15 @@ void resize_table() {
 
     // The count remains unchanged.
     printf("Resized table to new capacity: %zu\n", new_capacity);
+    pthread_mutex_unlock(&store_mutex);
 }
 
 // Free all nodes in a linked list.
 void free_list(Node *node) {
+    if (!node) {
+        // If the node is NULL, there's nothing to free.
+        return;
+    }
     while (node) {
         Node *temp = node;
         node = node->next;
@@ -287,12 +295,28 @@ void free_list(Node *node) {
 // Free the entire hash table.
 void free_table() {
     pthread_mutex_lock(&store_mutex);
+    // Check if the global table exists
+    if (!global_table) {
+        fprintf(stderr, "Error: Attempted to free a NULL hash table.\n");
+        pthread_mutex_unlock(&store_mutex);
+        return;
+    }
+
+    // Check if the buckets array exists
+    if (!global_table->buckets) {
+        fprintf(stderr, "Error: Hash table buckets are NULL.\n");
+        free(global_table);
+        pthread_mutex_unlock(&store_mutex);
+        return;
+    }
     for (size_t i = 0; i < global_table->capacity; i++) {
         if (global_table->buckets[i])
             free_list(global_table->buckets[i]);
     }
     free(global_table->buckets);
     free(global_table);
+    global_table = NULL; // Set to NULL to avoid dangling pointer
+    printf("Freed hash table and its buckets.\n");
     pthread_mutex_unlock(&store_mutex);
 };
 
@@ -334,17 +358,34 @@ char *dump_store(size_t index, size_t offset) {
     }
     garbage_collect();
     pthread_mutex_lock(&store_mutex);
-    char *dump = malloc(1);
+
+    size_t buffer_size = 1024; // Initial buffer size
+    char *dump = malloc(buffer_size);
     if (!dump) {
         perror("Failed to allocate dump string");
         exit(EXIT_FAILURE);
     }
     dump[0] = '\0';  // Start with an empty string.
+
     int increment = 0;
     for (size_t i = index; i < index+offset; i++) {
         Node *node = global_table->buckets[i];
         while (node) {
-                char line[strlen(node->key) + strlen(node->value) + 64];
+            // Calculate the required size for the new line
+            size_t line_size = strlen(node->key) + strlen(node->value) + 128;
+            if (strlen(dump) + line_size + 1 > buffer_size) {
+                // Expand the buffer size if needed
+                buffer_size = strlen(dump) + line_size + 1;
+                char *new_dump = realloc(dump, buffer_size);
+                if (!new_dump) {
+                    perror("Failed to reallocate dump string");
+                    free(dump);
+                    pthread_mutex_unlock(&store_mutex);
+                    return NULL;
+                }
+                dump = new_dump;
+            }
+                char line[line_size];
                 snprintf(line, sizeof(line), "%d: %s -- %s;\n bucket: %ld; timestamp: %ld; index: %ld\n\n",increment++, node->key, node->value, i, node->created_at, node->hash % global_table->capacity);
                 dump = realloc(dump, strlen(dump) + strlen(line) + 1); //this is stupid, I will do it better eventually
                 strncat(dump, line, strlen(line));
@@ -497,7 +538,8 @@ void *worker_thread() {
         for (int i = 0; i < num_events; i++) {
             //printf("Processing event %d\n", i);
             int client_socket = events[i].data.fd;
-            if (client_socket == server_socket) continue;
+            if (client_socket == server_socket)
+                continue;
             read_client_data(client_socket);
         }
     }
