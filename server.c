@@ -396,41 +396,44 @@ char *dump_store(size_t index, size_t offset) {
     return dump;
 }
 
-
 // ======== Read Client Data Function =========
 void read_client_data(int client_socket) {
-    //printf("Reading data from client: %d\n", client_socket);
     char buffer[BUFFER_SIZE];
-    while (1) {
-        int bytes_read = read(client_socket, buffer, BUFFER_SIZE - 1);
-        buffer[bytes_read] = '\0'; // Null-terminate the buffer.
-        trim_newline(buffer);      // Remove newline if present.
 
-        if (bytes_read == -1) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+    while (1) {
+        // Read data from the client
+        int bytes_read = read(client_socket, buffer, BUFFER_SIZE - 1);
+        if (bytes_read < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // No more data to read
+                break;
+            }
             perror("Read error");
             close(client_socket);
             return;
         }
 
         if (bytes_read == 0) {
+            // Client disconnected
             printf("Client disconnected: %d\n", client_socket);
             close(client_socket);
             epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_socket, NULL);
             return;
         }
 
+        // Null-terminate the buffer and trim newlines
+        buffer[bytes_read] = '\0';
+        trim_newline(buffer);
+
+        // Parse the command and arguments
         char command[16], key[256], value[768], ttl[32];
         size_t ttl_val = 0;
-        int num_tokens = sscanf(buffer, "%15s %255s %767s %32[^\n]", command, key, value, ttl);
+        int num_tokens = sscanf(buffer, "%15s %255s %767s %31s", command, key, value, ttl);
 
         if (num_tokens >= 1) {
-            if (num_tokens == 4)
-            { 
-                ttl_val = atoi(ttl);
-            } else {
-                ttl_val = MAX_TTL;
-            }
+            // Determine TTL value
+            ttl_val = (num_tokens == 4) ? atoi(ttl) : MAX_TTL;
+
             if (strcasecmp(command, "write") == 0 && num_tokens >= 3) {
                 if (insert(key, value, ttl_val, 0) == 1) {
                     write(client_socket, "OK\n", 3);
@@ -452,64 +455,44 @@ void read_client_data(int client_socket) {
             } else if (strcasecmp(command, "search") == 0 && num_tokens == 2) {
                 Node *found = search(key);
                 if (found) {
-                    char *response;
-                    response = malloc(BUFFER_SIZE);
-                    if (!response) {
-                        perror("Failed to allocate response string");
-                        exit(EXIT_FAILURE);
-                    }
+                    char response[BUFFER_SIZE];
                     snprintf(response, BUFFER_SIZE, "Found: %s, timestamp: %ld\n", found->value, found->created_at);
                     write(client_socket, response, strlen(response));
-                    free (response);
                 } else {
                     write(client_socket, "Not found\n", 10);
                 }
             } else if (strcasecmp(command, "quit") == 0) {
-                    const char *response = "Goodbye!\n";
-                    send(client_socket, response, strlen(response), 0);
-                    close(client_socket);
-                    break;
-            }  else if (strcasecmp(command, "dump" ) == 0 ) {
-                    size_t index, offset;
-                    if (num_tokens != 3) {
-                        index = 0;
-                        offset = INITIAL_CAPACITY - 1;
-                    } else{
-                        index = atoi(key);
-                        offset = atoi(value);
-                    }
-                    char *dump = dump_store(index, offset);
-                    if (!dump) {
-                        const char *response = "Error: failed to dump store\n";
-                        send(client_socket, response, strlen(response), 0);
-                        continue;
-                    } else{
-                       send(client_socket, dump, strlen(dump), 0);
-                       write(client_socket, "OK\n", 3);
-                       free(dump);                       
-                    } 
+                const char *response = "Goodbye!\n";
+                send(client_socket, response, strlen(response), 0);
+                close(client_socket);
+                break;
+            } else if (strcasecmp(command, "dump") == 0) {
+                size_t index = 0, offset = INITIAL_CAPACITY - 1;
+                if (num_tokens == 3) {
+                    index = atoi(key);
+                    offset = atoi(value);
+                }
+                char *dump = dump_store(index, offset);
+                if (dump) {
+                    send(client_socket, dump, strlen(dump), 0);
+                    free(dump);
+                } else {
+                    write(client_socket, "Error: failed to dump store\n", 28);
+                }
             } else if (strcasecmp(command, "size") == 0) {
                 garbage_collect();
-                char *response;
-                response = malloc(BUFFER_SIZE);
-                if (!response) {
-                    perror("Failed to allocate response string");
-                    exit(EXIT_FAILURE);
-                }
-                sprintf(response, "%zu, %zu\n", global_table->count, global_table->capacity);
+                char response[BUFFER_SIZE];
+                snprintf(response, BUFFER_SIZE, "%zu, %zu\n", global_table->count, global_table->capacity);
                 send(client_socket, response, strlen(response), 0);
             } else if (strcasecmp(command, "wipe") == 0) {
-                    free_table();
-                    int error = create_table(INITIAL_CAPACITY);
-                    if (error != 0) {
-                        perror("Failed to create hash table");
-                        exit(1);
-                    }
-                    const char *response = "All clean!\n";
-                    send(client_socket, response, strlen(response), 0);
+                free_table();
+                if (create_table(INITIAL_CAPACITY) != 0) {
+                    perror("Failed to create hash table");
+                    exit(EXIT_FAILURE);
+                }
+                write(client_socket, "All clean!\n", 11);
             } else if (strcasecmp(command, "delete") == 0 && num_tokens == 2) {
-                int result = delete(key);
-                if (result == 1) {
+                if (delete(key) == 1) {
                     write(client_socket, "OK\n", 3);
                 } else {
                     write(client_socket, "Not found\n", 10);
