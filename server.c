@@ -246,7 +246,7 @@ void resize_table() {
     pthread_mutex_lock(&store_mutex);
     size_t old_capacity = global_table->capacity;
     size_t new_capacity = old_capacity * 3;  // Growth strategy is simple.
-    Node **new_buckets = calloc(new_capacity * sizeof(Node *));
+    Node **new_buckets = calloc(new_capacity, sizeof(Node *));
     if (!new_buckets) {
         perror("Failed to allocate new buckets during resize");
         pthread_mutex_unlock(&store_mutex);
