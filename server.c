@@ -413,6 +413,10 @@ void read_client_data(int client_socket) {
                 if (found) {
                     char *response;
                     response = malloc(BUFFER_SIZE);
+                    if (!response) {
+                        perror("Failed to allocate response string");
+                        exit(EXIT_FAILURE);
+                    }
                     snprintf(response, BUFFER_SIZE, "Found: %s, timestamp: %ld\n", found->value, found->created_at);
                     write(client_socket, response, strlen(response));
                     free (response);
@@ -441,11 +445,16 @@ void read_client_data(int client_socket) {
                     } else{
                        send(client_socket, dump, strlen(dump), 0);
                        write(client_socket, "OK\n", 3);
+                       free(dump);                       
                     } 
             } else if (strcasecmp(command, "size") == 0) {
                 garbage_collect();
                 char *response;
                 response = malloc(BUFFER_SIZE);
+                if (!response) {
+                    perror("Failed to allocate response string");
+                    exit(EXIT_FAILURE);
+                }
                 sprintf(response, "%zu, %zu\n", global_table->count, global_table->capacity);
                 send(client_socket, response, strlen(response), 0);
             } else if (strcasecmp(command, "wipe") == 0) {
