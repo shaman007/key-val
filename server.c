@@ -528,21 +528,41 @@ void *worker_thread() {
     struct epoll_event events[MAX_EVENTS];
 
     while (1) {
-        //printf("Worker thread waiting for events...\n");
+        // Wait for events on the epoll instance
         int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
         if (num_events < 0) {
+            if (errno == EINTR) {
+                // Interrupted by a signal, continue waiting
+                continue;
+            }
             perror("epoll_wait failed");
-            continue;
+            break; // Exit the loop on critical error
         }
 
+        // Process each event
         for (int i = 0; i < num_events; i++) {
-            //printf("Processing event %d\n", i);
             int client_socket = events[i].data.fd;
-            if (client_socket == server_socket)
+
+            // Skip the server socket (handled in the main thread)
+            if (client_socket == server_socket) {
                 continue;
-            read_client_data(client_socket);
+            }
+
+            // Check for errors or invalid events
+            if (events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+                fprintf(stderr, "Client socket %d error or hang-up, closing connection\n", client_socket);
+                close(client_socket);
+                epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_socket, NULL);
+                continue;
+            }
+
+            // Handle readable events
+            if (events[i].events & EPOLLIN) {
+                read_client_data(client_socket);
+            }
         }
     }
+
     return NULL;
 }
 
