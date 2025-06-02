@@ -1,4 +1,6 @@
 # key-val
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fshaman007%2Fkey-val.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fshaman007%2Fkey-val?ref=badge_shield)
+
 
 ## About
 
@@ -30,3 +32,7 @@ Hash table, that stores key, it's hash, value and creation timestamp in a bucket
 ## Known problems
 
 * if client don't read socket but spams commands, servers segfaults. Yeah, that's the big one problem.
+
+
+## License
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fshaman007%2Fkey-val.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fshaman007%2Fkey-val?ref=badge_large)
