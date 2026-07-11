@@ -17,24 +17,34 @@ cat << 'EOF' > Makefile
 
 # Compiler and flags
 CC = gcc
-CFLAGS = -Wall -Wextra -g
+CFLAGS = -Wall -Wextra -g -Isrc
 LDFLAGS = -lpthread -luuid
 
 # Target to build the server executable
-server: server.c
-	$(CC) $(CFLAGS) -o server server.c $(LDFLAGS)
+server: server.c src/store.c src/store.h
+	$(CC) $(CFLAGS) -o server server.c src/store.c $(LDFLAGS)
 
 client: test/client.c
 	$(CC) $(CFLAGS) -o test/client test/client.c $(LDFLAGS)
 
-all: server client
+tests/store_test: tests/store_test.c src/store.c src/store.h
+	$(CC) $(CFLAGS) -o tests/store_test tests/store_test.c src/store.c $(LDFLAGS)
+
+test: tests/store_test
+	./tests/store_test
+
+smoke-test: server
+	bash tests/server_smoke.sh
+
+all: server client tests/store_test
 
 # Clean target to remove the built executable
 clean:
 	@rm -f server
 	@rm -f ./test/client
-.PHONY: clean
+	@rm -f ./tests/store_test
+	@rm -f ./tests/server_smoke.log
+.PHONY: clean test smoke-test
 EOF
 
 echo "Makefile created successfully."
-

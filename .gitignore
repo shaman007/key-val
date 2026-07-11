@@ -1,3 +1,8 @@
 Makefile
 server
 client
+test/client
+tests/store_test
+.codex-wsl/
+ubuntu-noble-wsl.rootfs.tar.gz
+tests/server_smoke.log

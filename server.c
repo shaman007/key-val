@@ -1,611 +1,477 @@
-#include <stdio.h>                  // For printf, perror, snprintf
-#include <stdlib.h>                 // For malloc, calloc, realloc, free, exit
-#include <string.h>                 // For strlen, strcmp, strdup, strtok, strncat, snprintf
-#include <unistd.h>                 // For close, read, write
-#include <arpa/inet.h>              // For sockaddr_in, inet_ntoa
-#include <fcntl.h>                  // For fcntl
-#include <sys/epoll.h>              // For epoll_create1, epoll_ctl, struct epoll_event
-#include <pthread.h>                // For pthread_create, pthread_mutex_t
-#include <errno.h>                  // For EAGAIN, EWOULDBLOCK
-#include <ctype.h>                  // For isspace
-#include <time.h>                   // For time
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <sys/epoll.h>
+#include <unistd.h>
 
-#define PORT 8080                   // Port to listen on
-#define MAX_EVENTS 1000             // Maximum number of events to process at once
-#define WORKER_THREADS 4            // Number of worker threads to create
-#define BUFFER_SIZE 1024            // Size of the read/write buffer
-#define INITIAL_CAPACITY 1023       // Initial capacity of the hash table, start with a prime number
-#define LOAD_FACTOR_THRESHOLD 0.75  // Load factor threshold for resizing the hash table
-#define MAX_TTL 31536000            // Maximum time-to-live for a key-value pair in seconds
+#include "src/store.h"
 
-pthread_mutex_t store_mutex = PTHREAD_MUTEX_INITIALIZER; // Mutex for the hash table modifications in the concurrent worker threads
+#define PORT 8080
+#define MAX_EVENTS 1000
+#define WORKER_THREADS 4
+#define INPUT_BUFFER_SIZE 4096
+#define INITIAL_OUTPUT_CAPACITY 1024
+#define INITIAL_CAPACITY 1023
 
-// ======== Hash Table Definitions =========
-typedef struct Node {
-    char *key;
-    char *value;
-    time_t created_at;
-    time_t ttl;
-    unsigned long hash;
-    struct Node *next;
-} Node;
+typedef struct Worker {
+    int epoll_fd;
+    pthread_t thread;
+} Worker;
 
-typedef struct HashTable {
-    Node **buckets;
-    size_t capacity;
-    size_t count;
-} HashTable;
+typedef struct Connection {
+    int fd;
+    Worker *worker;
+    char input[INPUT_BUFFER_SIZE];
+    size_t input_used;
+    char *output;
+    size_t output_used;
+    size_t output_sent;
+    size_t output_capacity;
+    int close_after_write;
+} Connection;
 
-// ======== Epoll Variables =========
-int epoll_fd;                   // Epoll file descriptor
-int server_socket;              // Server socket file descriptor
-HashTable *global_table;        // Global hash table
+static int server_socket;
+static Store *global_store;
+static Worker workers[WORKER_THREADS];
+static size_t next_worker;
 
-// ======== Utility Functions =========
-void set_nonblocking(int sock) {
+static int set_nonblocking(int sock) {
     int flags = fcntl(sock, F_GETFL, 0);
-    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-}
-
-// ======== Hash Table Functions =========
-unsigned long hash(const char *str) {
-    unsigned long hash = 5381;
-    int c;
-    while ((c = *str++)) {
-        hash = ((hash << 5) + hash) + c;
+    if (flags == -1) {
+        return -1;
     }
-    return hash;
+    return fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 }
 
-// Helper to trim newline and carriage return characters.
-void trim_newline(char *s) {
-    char *p = s;
-    while (*p) {
-        if (*p == '\n' || *p == '\r') {
-            *p = '\0';
-            break;
+static Connection *connection_create(int fd, Worker *worker) {
+    Connection *conn = calloc(1, sizeof(*conn));
+    if (!conn) {
+        return NULL;
+    }
+
+    conn->output = malloc(INITIAL_OUTPUT_CAPACITY);
+    if (!conn->output) {
+        free(conn);
+        return NULL;
+    }
+
+    conn->fd = fd;
+    conn->worker = worker;
+    conn->output_capacity = INITIAL_OUTPUT_CAPACITY;
+    return conn;
+}
+
+static void connection_destroy(Connection *conn) {
+    if (!conn) {
+        return;
+    }
+
+    epoll_ctl(conn->worker->epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
+    close(conn->fd);
+    free(conn->output);
+    free(conn);
+}
+
+static int connection_update_events(Connection *conn) {
+    struct epoll_event event;
+    event.data.ptr = conn;
+    event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
+    if (conn->output_sent < conn->output_used) {
+        event.events |= EPOLLOUT;
+    }
+
+    return epoll_ctl(conn->worker->epoll_fd, EPOLL_CTL_MOD, conn->fd, &event);
+}
+
+static int queue_bytes(Connection *conn, const char *data, size_t len) {
+    if (len == 0) {
+        return 0;
+    }
+
+    size_t pending = conn->output_used - conn->output_sent;
+    if (conn->output_sent > 0 && pending > 0) {
+        memmove(conn->output, conn->output + conn->output_sent, pending);
+        conn->output_used = pending;
+        conn->output_sent = 0;
+    } else if (pending == 0) {
+        conn->output_used = 0;
+        conn->output_sent = 0;
+    }
+
+    if (conn->output_used + len > conn->output_capacity) {
+        size_t new_capacity = conn->output_capacity;
+        while (conn->output_used + len > new_capacity) {
+            new_capacity *= 2;
         }
-        p++;
-    }
-}
 
-// Create a new hash table with a given capacity.
-int create_table(size_t capacity) {
-    global_table = malloc(sizeof(HashTable));
-    if (!global_table) {
-        perror("Failed to allocate hash table");
-        exit(EXIT_FAILURE);
+        char *new_output = realloc(conn->output, new_capacity);
+        if (!new_output) {
+            return -1;
+        }
+
+        conn->output = new_output;
+        conn->output_capacity = new_capacity;
     }
-    global_table->capacity = capacity;
-    global_table->count = 0;
-    global_table->buckets = malloc(global_table->capacity * sizeof(Node *));
-    if (!global_table->buckets) {
-        perror("Failed to allocate buckets");
-        free(global_table);
-        exit(EXIT_FAILURE);
-    }
+
+    memcpy(conn->output + conn->output_used, data, len);
+    conn->output_used += len;
     return 0;
 }
 
-// Create a new node with key and value.
-Node *create_node(const char *key, const char *value, unsigned long h) {
-    Node *new_node = calloc(1, sizeof(Node));
-    if (!new_node) {
-        perror("Failed to allocate node");
-        exit(EXIT_FAILURE);
-    }
-    new_node->key = strdup(key);
-    if (!new_node->key) {
-        perror("Failed to allocate key string");
-        free(new_node);
-        exit(EXIT_FAILURE);
-    }
-    new_node->value = strdup(value);
-    if (!new_node->value) {
-        perror("Failed to allocate value string");
-        free(new_node->key);
-        free(new_node);
-        exit(EXIT_FAILURE);
-    }
-    new_node->ttl = MAX_TTL;
-    new_node->hash = h;
-    new_node->created_at = time(NULL);
-    new_node->next = NULL;
-
-    return new_node;
+static int queue_text(Connection *conn, const char *text) {
+    return queue_bytes(conn, text, strlen(text));
 }
 
-// Forward declaration for rehashing.
-void resize_table();
-
-// Insert a key-value pair into the hash table.
-int insert(const char *key, const char *value, size_t ttl, int type) {
-    pthread_mutex_lock(&store_mutex);
-    // Check if we need to resize before inserting.
-    double load_factor = (double)global_table->count / global_table->capacity;
-    if (load_factor > LOAD_FACTOR_THRESHOLD) {
-        resize_table(global_table);
+static int flush_output(Connection *conn) {
+    while (conn->output_sent < conn->output_used) {
+        ssize_t written = write(conn->fd, conn->output + conn->output_sent, conn->output_used - conn->output_sent);
+        if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return 0;
+            }
+            return -1;
+        }
+        if (written == 0) {
+            return 0;
+        }
+        conn->output_sent += (size_t)written;
     }
-    unsigned long h = hash(key);
-    unsigned long index = h % global_table->capacity;
-    Node *head = global_table->buckets[index];
 
-    // Check if the key already exists; if so, update its value.
-    for (Node *curr = head; curr != NULL; curr = curr->next) {
-        if (strcmp(curr->key, key) == 0) {
-            // Replace the existing value, if it's not 'add' operation.
-            if (type !=2)
-            {
-                free(curr->value);
-                curr->value = strdup(value);
-                curr->ttl = ttl;
-                if (!curr->value) {
-                    perror("Failed to allocate new value string");
-                    exit(EXIT_FAILURE);
-                }
-                curr->created_at = time(NULL);
-                pthread_mutex_unlock(&store_mutex);
-                return 1;
-            } else {
-                pthread_mutex_unlock(&store_mutex);
+    conn->output_used = 0;
+    conn->output_sent = 0;
+    return conn->close_after_write ? 1 : 0;
+}
+
+static time_t parse_ttl(int num_tokens, const char *ttl) {
+    if (num_tokens != 4) {
+        return STORE_DEFAULT_MAX_TTL;
+    }
+
+    char *end = NULL;
+    long value = strtol(ttl, &end, 10);
+    if (!end || *end != '\0' || value <= 0) {
+        return STORE_DEFAULT_MAX_TTL;
+    }
+    return (time_t)value;
+}
+
+static int handle_store_write(Connection *conn, const char *key, const char *value, time_t ttl, StoreWriteMode mode) {
+    StoreResult result = store_put(global_store, key, value, ttl, mode);
+    if (result == STORE_OK) {
+        return queue_text(conn, "OK\n");
+    }
+    if (result == STORE_EXISTS) {
+        return queue_text(conn, "Error: failed to add, key exists\n");
+    }
+    if (result == STORE_NOT_FOUND) {
+        return queue_text(conn, "Error: failed to update, key not found\n");
+    }
+    return queue_text(conn, "Error: failed to write\n");
+}
+
+static int handle_command(Connection *conn, char *line) {
+    char command[16] = {0};
+    char key[256] = {0};
+    char value[768] = {0};
+    char ttl[32] = {0};
+    int num_tokens = sscanf(line, "%15s %255s %767s %31s", command, key, value, ttl);
+
+    if (num_tokens < 1) {
+        return queue_text(conn, "Error: invalid command! Use write, search, dump, delete, size, wipe or quit.\n");
+    }
+
+    time_t ttl_val = parse_ttl(num_tokens, ttl);
+
+    if (strcasecmp(command, "write") == 0 && num_tokens >= 3) {
+        return handle_store_write(conn, key, value, ttl_val, STORE_WRITE);
+    }
+    if (strcasecmp(command, "update") == 0 && num_tokens >= 3) {
+        return handle_store_write(conn, key, value, ttl_val, STORE_UPDATE);
+    }
+    if (strcasecmp(command, "add") == 0 && num_tokens >= 3) {
+        return handle_store_write(conn, key, value, ttl_val, STORE_ADD);
+    }
+    if (strcasecmp(command, "search") == 0 && num_tokens == 2) {
+        StoreEntry entry;
+        StoreResult result = store_get(global_store, key, &entry);
+        if (result == STORE_OK) {
+            int needed = snprintf(NULL, 0, "Found: %s, timestamp: %ld\n", entry.value, (long)entry.created_at);
+            if (needed < 0) {
+                store_entry_free(&entry);
+                return -1;
+            }
+
+            char *response = malloc((size_t)needed + 1);
+            if (!response) {
+                store_entry_free(&entry);
+                return -1;
+            }
+            snprintf(response, (size_t)needed + 1, "Found: %s, timestamp: %ld\n", entry.value, (long)entry.created_at);
+            int queued = queue_text(conn, response);
+            free(response);
+            store_entry_free(&entry);
+            return queued;
+        }
+        return queue_text(conn, "Not found\n");
+    }
+    if (strcasecmp(command, "quit") == 0) {
+        conn->close_after_write = 1;
+        return queue_text(conn, "Goodbye!\n");
+    }
+    if (strcasecmp(command, "dump") == 0) {
+        size_t index = 0;
+        size_t offset = INITIAL_CAPACITY - 1;
+        if (num_tokens == 3) {
+            index = (size_t)strtoul(key, NULL, 10);
+            offset = (size_t)strtoul(value, NULL, 10);
+        }
+
+        char *dump = store_dump(global_store, index, offset);
+        if (dump) {
+            int queued = queue_text(conn, dump);
+            free(dump);
+            return queued;
+        }
+        return queue_text(conn, "Error: failed to dump store\n");
+    }
+    if (strcasecmp(command, "size") == 0) {
+        char response[128];
+        snprintf(response, sizeof(response), "%zu, %zu\n", store_count(global_store), store_capacity(global_store));
+        return queue_text(conn, response);
+    }
+    if (strcasecmp(command, "wipe") == 0) {
+        store_clear(global_store);
+        return queue_text(conn, "All clean!\n");
+    }
+    if (strcasecmp(command, "delete") == 0 && num_tokens == 2) {
+        if (store_delete(global_store, key) == STORE_OK) {
+            return queue_text(conn, "OK\n");
+        }
+        return queue_text(conn, "Not found\n");
+    }
+
+    return queue_text(conn, "Error: unknown command! Use write, search, dump, delete, size, wipe or quit.\n");
+}
+
+static void consume_input(Connection *conn, size_t consumed) {
+    size_t remaining = conn->input_used - consumed;
+    if (remaining > 0) {
+        memmove(conn->input, conn->input + consumed, remaining);
+    }
+    conn->input_used = remaining;
+}
+
+static int process_input_lines(Connection *conn) {
+    while (1) {
+        void *newline_ptr = memchr(conn->input, '\n', conn->input_used);
+        if (!newline_ptr) {
+            if (conn->input_used == sizeof(conn->input)) {
+                conn->input_used = 0;
+                conn->close_after_write = 1;
+                return queue_text(conn, "Error: command too long\n");
+            }
+            return 0;
+        }
+
+        size_t line_len = (char *)newline_ptr - conn->input;
+        size_t consumed = line_len + 1;
+        if (line_len > 0 && conn->input[line_len - 1] == '\r') {
+            line_len--;
+        }
+
+        char line[INPUT_BUFFER_SIZE];
+        memcpy(line, conn->input, line_len);
+        line[line_len] = '\0';
+        consume_input(conn, consumed);
+
+        if (handle_command(conn, line) < 0) {
+            return -1;
+        }
+        if (conn->close_after_write) {
+            return 0;
+        }
+    }
+}
+
+static int read_client_data(Connection *conn) {
+    while (!conn->close_after_write) {
+        ssize_t bytes_read = read(conn->fd, conn->input + conn->input_used, sizeof(conn->input) - conn->input_used);
+        if (bytes_read < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return 0;
+            }
+            return -1;
+        }
+
+        if (bytes_read == 0) {
+            return 1;
+        }
+
+        conn->input_used += (size_t)bytes_read;
+        if (process_input_lines(conn) < 0) {
+            return -1;
+        }
+        if (conn->input_used == sizeof(conn->input) && !conn->close_after_write) {
+            conn->input_used = 0;
+            conn->close_after_write = 1;
+            if (queue_text(conn, "Error: command too long\n") < 0) {
                 return -1;
             }
         }
     }
 
-    // Key not found; create a new node and insert at the beginning.
-    if (type != 1)
-    {
-        Node *new_node = create_node(key, value, h);
-        new_node->created_at = time(NULL);
-        new_node->ttl = ttl;
-        new_node->next = head;
-        global_table->buckets[index] = new_node;
-        global_table->count++;
-        pthread_mutex_unlock(&store_mutex);
-        return 1;
-    } else {
-        pthread_mutex_unlock(&store_mutex);
-        return -1;
-    }
+    return 0;
 }
 
-int delete(const char *key);
+static void handle_connection_event(Connection *conn, uint32_t events) {
+    int should_close = 0;
 
-// Search for a key in the hash table. Returns the value string if found,
-// or NULL if the key does not exist.
-Node *search(const char *key) {
-    pthread_mutex_lock(&store_mutex);
-    unsigned long h = hash(key);
-    unsigned long index = h % global_table->capacity;
-    Node *node = global_table->buckets[index];
-    Node *prev = NULL;
-    while (node) {
-        if (node->hash == h && strcmp(node->key, key) == 0 && (time(NULL) - node->created_at) < node->ttl) {
-            printf("%ld, %ld\n", time(NULL) - node->created_at, node->ttl);
-            pthread_mutex_unlock(&store_mutex);
-            return node;
-        }else if (node->hash == h && strcmp(node->key, key) == 0 && (time(NULL) - node->created_at) >= node->ttl) {
-            // This block basically do part of delete(), but without strings comparison since we already have the node to delete
-            if (prev) {
-                    prev->next = node->next;
-                } else {
-                    global_table->buckets[index] = node->next;
-                }
-            free(node->key);
-            free(node->value);
-            free(node);
-            global_table->count--;
-            pthread_mutex_unlock(&store_mutex);
-            return NULL;              
-        }
-        prev = node;
-        node = node->next;
-    }
-    pthread_mutex_unlock(&store_mutex);
-    return NULL;
-}
-
-// Delete a key from the hash table. Returns 1 if the key was found and deleted, -1 otherwise.
-int delete(const char *key) {
-    Node *delete_node = search(key);
-    if (delete_node == NULL) {
-        return -1;
-    } else
-    {
-        pthread_mutex_lock(&store_mutex);
-        unsigned long h = hash(key);
-        unsigned long index = h % global_table->capacity;
-        Node *node = global_table->buckets[index];
-        Node *prev = NULL;
-        while (node) {
-            if (node->hash == h && strcmp(node->key, key) == 0) {
-                if (prev) {
-                    prev->next = node->next;
-                } else {
-                    global_table->buckets[index] = node->next;
-                }
-                free(node->key);
-                free(node->value);
-                free(node);
-                global_table->count--;
-                pthread_mutex_unlock(&store_mutex);
-                return 1;
-            }
-            prev = node;
-            node = node->next;
-        }
-        pthread_mutex_unlock(&store_mutex);
-        return -1;
-    }
-}
-
-
-// Resize the hash table to a new capacity.
-void resize_table() {
-    pthread_mutex_lock(&store_mutex);
-    size_t old_capacity = global_table->capacity;
-    size_t new_capacity = old_capacity * 3;  // Growth strategy is simple.
-    Node **new_buckets = calloc(new_capacity, sizeof(Node *));
-    if (!new_buckets) {
-        perror("Failed to allocate new buckets during resize");
-        pthread_mutex_unlock(&store_mutex);
-        exit(EXIT_FAILURE);
+    if (events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+        should_close = 1;
     }
 
-    // Rehash all existing entries into the new bucket array.
-    for (size_t i = 0; i < old_capacity; i++) {
-        Node *node = global_table->buckets[i];
-        while (node) {
-            Node *next_node = node->next; // Save next pointer.
-
-            unsigned long new_index = node->hash % new_capacity;
-            // Insert node into new bucket list.
-            node->next = new_buckets[new_index];
-            new_buckets[new_index] = node;
-            node = next_node;
+    if (!should_close && (events & EPOLLIN)) {
+        int read_result = read_client_data(conn);
+        if (read_result != 0) {
+            should_close = 1;
         }
     }
 
-    // Replace old buckets with new buckets.
-    free(global_table->buckets);
-    global_table->buckets = new_buckets;
-    global_table->capacity = new_capacity;
-
-    // The count remains unchanged.
-    printf("Resized table to new capacity: %zu\n", new_capacity);
-    pthread_mutex_unlock(&store_mutex);
-}
-
-// Free all nodes in a linked list.
-void free_list(Node *node) {
-    if (!node) {
-        // If the node is NULL, there's nothing to free.
-        return;
+    if (!should_close && (events & EPOLLOUT)) {
+        int write_result = flush_output(conn);
+        if (write_result != 0) {
+            should_close = 1;
+        }
     }
-    while (node) {
-        Node *temp = node;
-        node = node->next;
-        free(temp->key);
-        free(temp->value);
-        free(temp);
-    }
-}
 
-// Free the entire hash table.
-void free_table() {
-    pthread_mutex_lock(&store_mutex);
-    // Check if the global table exists
-    if (!global_table) {
-        fprintf(stderr, "Error: Attempted to free a NULL hash table.\n");
-        pthread_mutex_unlock(&store_mutex);
+    if (!should_close && conn->output_sent < conn->output_used) {
+        int write_result = flush_output(conn);
+        if (write_result != 0) {
+            should_close = 1;
+        }
+    }
+
+    if (should_close) {
+        connection_destroy(conn);
         return;
     }
 
-    // Check if the buckets array exists
-    if (!global_table->buckets) {
-        fprintf(stderr, "Error: Hash table buckets are NULL.\n");
-        free(global_table);
-        pthread_mutex_unlock(&store_mutex);
-        return;
-    }
-    for (size_t i = 0; i < global_table->capacity; i++) {
-        if (global_table->buckets[i])
-            free_list(global_table->buckets[i]);
-    }
-    free(global_table->buckets);
-    free(global_table);
-    global_table = NULL; // Set to NULL to avoid dangling pointer
-    printf("Freed hash table and its buckets.\n");
-    pthread_mutex_unlock(&store_mutex);
-};
-
-void garbage_collect() {
-    pthread_mutex_lock(&store_mutex);
-    for (size_t i = 0; i < global_table->capacity; i++) {
-        Node *node = global_table->buckets[i];
-        Node *prev = NULL;
-        while (node) {
-            if (node->ttl < (time(NULL) - node->created_at)) {
-                if (prev) {
-                    prev->next = node->next;
-                } else {
-                    global_table->buckets[i] = node->next;
-                }
-                free(node->key);
-                free(node->value);
-                free(node);
-                if (prev) {
-                    node = prev->next;
-                } else {
-                    node = global_table->buckets[i];
-                }
-                global_table->count--;
-            } else {
-                prev = node;
-                node = node->next;
-            }
-        }
-    }
-    pthread_mutex_unlock(&store_mutex);
-}
-
-// Dump the contents of the hash table as a string.
-char *dump_store(size_t index, size_t offset) {
-    if (index >= global_table->capacity || index + offset >= global_table->capacity) {
-        perror("Invalid index or offset");
-        return NULL;
-    }
-    garbage_collect();
-    pthread_mutex_lock(&store_mutex);
-
-    size_t buffer_size = 1024; // Initial buffer size
-    char *dump = malloc(buffer_size);
-    if (!dump) {
-        perror("Failed to allocate dump string");
-        exit(EXIT_FAILURE);
-    }
-    dump[0] = '\0';  // Start with an empty string.
-
-    int increment = 0;
-    for (size_t i = index; i < index+offset; i++) {
-        Node *node = global_table->buckets[i];
-        while (node) {
-            // Calculate the required size for the new line
-            size_t line_size = strlen(node->key) + strlen(node->value) + 128;
-            if (strlen(dump) + line_size + 1 > buffer_size) {
-                // Expand the buffer size if needed
-                buffer_size = strlen(dump) + line_size + 1;
-                char *new_dump = realloc(dump, buffer_size);
-                if (!new_dump) {
-                    perror("Failed to reallocate dump string");
-                    free(dump);
-                    pthread_mutex_unlock(&store_mutex);
-                    return NULL;
-                }
-                dump = new_dump;
-            }
-                char line[line_size];
-                snprintf(line, sizeof(line), "%d: %s -- %s;\n bucket: %ld; timestamp: %ld; index: %ld\n\n",increment++, node->key, node->value, i, node->created_at, node->hash % global_table->capacity);
-                dump = realloc(dump, strlen(dump) + strlen(line) + 1); //this is stupid, I will do it better eventually
-                strncat(dump, line, strlen(line));
-                node = node->next;
-        }
-    }
-    pthread_mutex_unlock(&store_mutex);
-    return dump;
-}
-
-// ======== Read Client Data Function =========
-void read_client_data(int client_socket) {
-    char buffer[BUFFER_SIZE];
-
-    while (1) {
-        // Read data from the client
-        int bytes_read = read(client_socket, buffer, BUFFER_SIZE - 1);
-        if (bytes_read < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // No more data to read
-                break;
-            }
-            perror("Read error");
-            close(client_socket);
-            return;
-        }
-
-        if (bytes_read == 0) {
-            // Client disconnected
-            printf("Client disconnected: %d\n", client_socket);
-            close(client_socket);
-            epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_socket, NULL);
-            return;
-        }
-
-        // Null-terminate the buffer and trim newlines
-        buffer[bytes_read] = '\0';
-        trim_newline(buffer);
-
-        // Parse the command and arguments
-        char command[16], key[256], value[768], ttl[32];
-        size_t ttl_val = 0;
-        int num_tokens = sscanf(buffer, "%15s %255s %767s %31s", command, key, value, ttl);
-
-        if (num_tokens >= 1) {
-            // Determine TTL value
-            ttl_val = (num_tokens == 4) ? atoi(ttl) : MAX_TTL;
-
-            if (strcasecmp(command, "write") == 0 && num_tokens >= 3) {
-                if (insert(key, value, ttl_val, 0) == 1) {
-                    write(client_socket, "OK\n", 3);
-                } else {
-                    write(client_socket, "Error: failed to write\n", 23);
-                }
-            } else if (strcasecmp(command, "update") == 0 && num_tokens >= 3) {
-                if (insert(key, value, ttl_val, 1) == 1) {
-                    write(client_socket, "OK\n", 3);
-                } else {
-                    write(client_socket, "Error: failed to update, key not found\n", 39);
-                }
-            } else if (strcasecmp(command, "add") == 0 && num_tokens >= 3) {
-                if (insert(key, value, ttl_val, 2) == 1) {
-                    write(client_socket, "OK\n", 3);
-                } else {
-                    write(client_socket, "Error: failed to add, key exists\n", 33);
-                }
-            } else if (strcasecmp(command, "search") == 0 && num_tokens == 2) {
-                Node *found = search(key);
-                if (found) {
-                    char response[BUFFER_SIZE];
-                    snprintf(response, BUFFER_SIZE, "Found: %s, timestamp: %ld\n", found->value, found->created_at);
-                    write(client_socket, response, strlen(response));
-                } else {
-                    write(client_socket, "Not found\n", 10);
-                }
-            } else if (strcasecmp(command, "quit") == 0) {
-                const char *response = "Goodbye!\n";
-                send(client_socket, response, strlen(response), 0);
-                close(client_socket);
-                break;
-            } else if (strcasecmp(command, "dump") == 0) {
-                size_t index = 0, offset = INITIAL_CAPACITY - 1;
-                if (num_tokens == 3) {
-                    index = atoi(key);
-                    offset = atoi(value);
-                }
-                char *dump = dump_store(index, offset);
-                if (dump) {
-                    send(client_socket, dump, strlen(dump), 0);
-                    free(dump);
-                } else {
-                    write(client_socket, "Error: failed to dump store\n", 28);
-                }
-            } else if (strcasecmp(command, "size") == 0) {
-                garbage_collect();
-                char response[BUFFER_SIZE];
-                snprintf(response, BUFFER_SIZE, "%zu, %zu\n", global_table->count, global_table->capacity);
-                send(client_socket, response, strlen(response), 0);
-            } else if (strcasecmp(command, "wipe") == 0) {
-                free_table();
-                if (create_table(INITIAL_CAPACITY) != 0) {
-                    perror("Failed to create hash table");
-                    exit(EXIT_FAILURE);
-                }
-                write(client_socket, "All clean!\n", 11);
-            } else if (strcasecmp(command, "delete") == 0 && num_tokens == 2) {
-                if (delete(key) == 1) {
-                    write(client_socket, "OK\n", 3);
-                } else {
-                    write(client_socket, "Not found\n", 10);
-                }
-            } else {
-                write(client_socket, "Error: unknown command! Use write, search, dump, delete, size, wipe or quit.\n", 78);
-            }
-        } else {
-            write(client_socket, "Error: invalid command! Use write, search, dump, delete, size, wipe or quit.\n", 78);
-        }
+    if (connection_update_events(conn) < 0) {
+        connection_destroy(conn);
     }
 }
 
-// ======== Worker Thread Function =========
-void *worker_thread() {
+static void *worker_thread(void *arg) {
+    Worker *worker = arg;
     struct epoll_event events[MAX_EVENTS];
 
     while (1) {
-        // Wait for events on the epoll instance
-        int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+        int num_events = epoll_wait(worker->epoll_fd, events, MAX_EVENTS, -1);
         if (num_events < 0) {
             if (errno == EINTR) {
-                // Interrupted by a signal, continue waiting
                 continue;
             }
-            perror("epoll_wait failed");
-            break; // Exit the loop on critical error
+            perror("epoll_wait");
+            break;
         }
 
-        // Process each event
         for (int i = 0; i < num_events; i++) {
-            int client_socket = events[i].data.fd;
-
-            // Skip the server socket (handled in the main thread)
-            if (client_socket == server_socket) {
-                continue;
-            }
-
-            // Check for errors or invalid events
-            if (events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-                fprintf(stderr, "Client socket %d error or hang-up, closing connection\n", client_socket);
-                close(client_socket);
-                epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_socket, NULL);
-                continue;
-            }
-
-            // Handle readable events
-            if (events[i].events & EPOLLIN) {
-                read_client_data(client_socket);
-            }
+            handle_connection_event(events[i].data.ptr, events[i].events);
         }
     }
 
     return NULL;
 }
 
-// ======== Main Function =========
-int main() {
-    struct sockaddr_in server_addr; // Server address structure
-    int opt = 1;                    // For setsockopt reuseaddr option to avoid "Address already in use" error
-
-    // Create server socket
-    server_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_socket == -1) {
-        perror("Socket creation failed");
-        exit(1);
+static int accept_client(int client_socket) {
+    if (set_nonblocking(client_socket) < 0) {
+        perror("set_nonblocking");
+        close(client_socket);
+        return -1;
     }
 
-    setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    Worker *worker = &workers[next_worker];
+    next_worker = (next_worker + 1) % WORKER_THREADS;
 
+    Connection *conn = connection_create(client_socket, worker);
+    if (!conn) {
+        close(client_socket);
+        return -1;
+    }
+
+    struct epoll_event event;
+    event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
+    event.data.ptr = conn;
+    if (epoll_ctl(worker->epoll_fd, EPOLL_CTL_ADD, client_socket, &event) < 0) {
+        perror("epoll_ctl client");
+        connection_destroy(conn);
+        return -1;
+    }
+
+    return 0;
+}
+
+int main(void) {
+    struct sockaddr_in server_addr;
+    int opt = 1;
+
+    global_store = store_create(INITIAL_CAPACITY, STORE_DEFAULT_MAX_TTL);
+    if (!global_store) {
+        fprintf(stderr, "Failed to create store\n");
+        return EXIT_FAILURE;
+    }
+
+    server_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_socket == -1) {
+        perror("socket");
+        return EXIT_FAILURE;
+    }
+
+    if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        perror("setsockopt");
+        return EXIT_FAILURE;
+    }
+
+    memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(PORT);
 
     if (bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-        perror("Bind failed");
-        exit(1);
+        perror("bind");
+        return EXIT_FAILURE;
     }
 
     if (listen(server_socket, SOMAXCONN) < 0) {
-        perror("Listen failed");
-        exit(1);
+        perror("listen");
+        return EXIT_FAILURE;
+    }
+
+    for (int i = 0; i < WORKER_THREADS; i++) {
+        workers[i].epoll_fd = epoll_create1(0);
+        if (workers[i].epoll_fd == -1) {
+            perror("epoll_create1");
+            return EXIT_FAILURE;
+        }
+
+        if (pthread_create(&workers[i].thread, NULL, worker_thread, &workers[i]) != 0) {
+            perror("pthread_create");
+            return EXIT_FAILURE;
+        }
     }
 
     printf("Server listening on port %d...\n", PORT);
-
-    // Create epoll instance
-    epoll_fd = epoll_create1(0);
-    if (epoll_fd == -1) {
-        perror("epoll_create1 failed");
-        exit(1);
-    }
-
-    // Add server socket to epoll
-    struct epoll_event event;        // Event structure to add to epoll
-    event.events = EPOLLIN;          // Read event for the server socket
-    event.data.fd = server_socket;   // Server socket file descriptor
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_socket, &event) < 0) {
-        perror("epoll_ctl server_socket failed");
-        exit(1);
-    }
-
-    // Create worker threads
-    pthread_t threads[WORKER_THREADS];         // Worker thread array
-    for (int i = 0; i < WORKER_THREADS; i++) {
-        pthread_create(&threads[i], NULL, worker_thread, NULL);
-    }
-
-    int error = create_table(INITIAL_CAPACITY);
-    if (error != 0) {
-        perror("Failed to create hash table");
-        exit(1);
-    }
 
     while (1) {
         struct sockaddr_in client_addr;
@@ -613,22 +479,17 @@ int main() {
         int client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &client_len);
 
         if (client_socket < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
-            perror("accept failed");
+            if (errno == EINTR) {
+                continue;
+            }
+            perror("accept");
             continue;
         }
 
-        printf("Accepted connection from %s:%d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
-        set_nonblocking(client_socket);
-
-        event.events = EPOLLIN | EPOLLET;
-        event.data.fd = client_socket;
-        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_socket, &event) < 0) {
-            perror("epoll_ctl client_socket failed");
-            close(client_socket);
-        }
+        accept_client(client_socket);
     }
 
+    store_destroy(global_store);
     close(server_socket);
-    return 0;
+    return EXIT_SUCCESS;
 }
