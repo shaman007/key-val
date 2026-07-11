@@ -173,7 +173,6 @@ StoreResult store_put(Store *store, const char *key, const char *value, time_t t
     }
 
     pthread_mutex_lock(&store->mutex);
-    collect_expired_locked(store);
 
     if ((double)store->count / store->capacity > LOAD_FACTOR_THRESHOLD) {
         StoreResult resized = resize_locked(store);
@@ -186,10 +185,22 @@ StoreResult store_put(Store *store, const char *key, const char *value, time_t t
     unsigned long hash = hash_key(key);
     size_t index = hash % store->capacity;
     StoreNode *head = store->buckets[index];
+    StoreNode *prev = NULL;
     time_t now = time(NULL);
 
     for (StoreNode *node = head; node; node = node->next) {
         if (node->hash == hash && strcmp(node->key, key) == 0) {
+            if (is_expired(node, now)) {
+                if (prev) {
+                    prev->next = node->next;
+                } else {
+                    store->buckets[index] = node->next;
+                    head = node->next;
+                }
+                free_node(node);
+                store->count--;
+                break;
+            }
             if (mode == STORE_ADD) {
                 pthread_mutex_unlock(&store->mutex);
                 return STORE_EXISTS;
@@ -207,6 +218,7 @@ StoreResult store_put(Store *store, const char *key, const char *value, time_t t
             pthread_mutex_unlock(&store->mutex);
             return STORE_OK;
         }
+        prev = node;
     }
 
     if (mode == STORE_UPDATE) {

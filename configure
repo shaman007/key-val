@@ -30,21 +30,29 @@ client: test/client.c
 tests/store_test: tests/store_test.c src/store.c src/store.h
 	$(CC) $(CFLAGS) -o tests/store_test tests/store_test.c src/store.c $(LDFLAGS)
 
+tests/perf_test: tests/perf_test.c
+	$(CC) $(CFLAGS) -o tests/perf_test tests/perf_test.c -lpthread
+
 test: tests/store_test
 	./tests/store_test
 
 smoke-test: server
 	bash tests/server_smoke.sh
 
-all: server client tests/store_test
+perf-test: server tests/perf_test
+	bash tests/perf_test.sh
+
+all: server client tests/store_test tests/perf_test
 
 # Clean target to remove the built executable
 clean:
 	@rm -f server
 	@rm -f ./test/client
 	@rm -f ./tests/store_test
+	@rm -f ./tests/perf_test
 	@rm -f ./tests/server_smoke.log
-.PHONY: clean test smoke-test
+	@rm -f ./tests/perf_server.log
+.PHONY: clean test smoke-test perf-test
 EOF
 
 echo "Makefile created successfully."

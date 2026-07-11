@@ -14,6 +14,11 @@ cleanup() {
 
 wait_for_server() {
     for _ in {1..50}; do
+        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+            echo "server exited during startup" >&2
+            cat "$SERVER_LOG" >&2 || true
+            return 1
+        fi
         if bash -c 'exec 9<>/dev/tcp/127.0.0.1/8080' 2>/dev/null; then
             return 0
         fi
@@ -37,6 +42,11 @@ assert_eq() {
 }
 
 cd "$ROOT_DIR"
+if bash -c 'exec 9<>/dev/tcp/127.0.0.1/8080' 2>/dev/null; then
+    echo "port 8080 is already in use; stop the existing server before smoke-test" >&2
+    exit 1
+fi
+
 ./server >"$SERVER_LOG" 2>&1 &
 SERVER_PID="$!"
 trap cleanup EXIT

@@ -6,3 +6,5 @@ tests/store_test
 .codex-wsl/
 ubuntu-noble-wsl.rootfs.tar.gz
 tests/server_smoke.log
+tests/perf_test
+tests/perf_server.log
