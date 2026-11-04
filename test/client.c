@@ -3,7 +3,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-#include <uuid/uuid.h>
 #include <time.h>
 #include <unistd.h>
 #define SERVER_IP "127.0.0.1"
@@ -25,7 +24,7 @@ void send_command(int sockfd, const char *command) {
     printf("Sending: %s\n", command);
 #endif
     send(sockfd, command, strlen(command), 0);
-    
+
     // Read server response
     ssize_t bytes_received = recv(sockfd, response, BUFFER_SIZE - 1, 0);
 #ifdef DEBUG
@@ -41,18 +40,16 @@ void send_command(int sockfd, const char *command) {
 
 void run_sequence(int sockfd, int num_writes) {
     char buffer[BUFFER_SIZE];
-    uuid_t uuid;
     char uuid_str[37];
 
     for (int i = 0; i < num_writes; i++) {
-        uuid_generate(uuid);
-        uuid_unparse(uuid, uuid_str);
+        snprintf(uuid_str, sizeof(uuid_str), "client-%ld-%d", (long)getpid(), i);
 
         int str_len = (rand() % 512) + 1;
         char random_string[str_len + 1];
         generate_random_string(random_string, str_len);
 
-        snprintf(buffer, strlen(random_string)+strlen(uuid_str) + 128, "write %s %s 15", uuid_str, random_string);
+        snprintf(buffer, sizeof(buffer), "write %s %s 15\n", uuid_str, random_string);
         send_command(sockfd, buffer);
     }
 
@@ -71,7 +68,7 @@ int main(int argc, char *argv[]) {
     }
 
     srand(time(NULL));
-    
+
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         perror("Socket creation failed");

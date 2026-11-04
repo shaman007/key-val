@@ -8,3 +8,7 @@ ubuntu-noble-wsl.rootfs.tar.gz
 tests/server_smoke.log
 tests/perf_test
 tests/perf_server.log
+
+tests/kv_bench
+tests/__pycache__/
+benchmark-results.json

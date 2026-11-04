@@ -2,6 +2,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <netinet/tcp.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +18,7 @@
 #define WORKER_THREADS 4
 #define INPUT_BUFFER_SIZE 4096
 #define INITIAL_OUTPUT_CAPACITY 1024
+#define MAX_OUTPUT_CAPACITY (1024 * 1024)
 #define INITIAL_CAPACITY 1023
 
 typedef struct Worker {
@@ -33,6 +36,7 @@ typedef struct Connection {
     size_t output_sent;
     size_t output_capacity;
     int close_after_write;
+    uint32_t registered_events;
 } Connection;
 
 static int server_socket;
@@ -80,12 +84,15 @@ static void connection_destroy(Connection *conn) {
 static int connection_update_events(Connection *conn) {
     struct epoll_event event;
     event.data.ptr = conn;
-    event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
+    event.events = conn->close_after_write ? 0 : EPOLLIN | EPOLLRDHUP;
     if (conn->output_sent < conn->output_used) {
         event.events |= EPOLLOUT;
     }
 
-    return epoll_ctl(conn->worker->epoll_fd, EPOLL_CTL_MOD, conn->fd, &event);
+    if (event.events == conn->registered_events) return 0;
+    if (epoll_ctl(conn->worker->epoll_fd, EPOLL_CTL_MOD, conn->fd, &event) < 0) return -1;
+    conn->registered_events = event.events;
+    return 0;
 }
 
 static int queue_bytes(Connection *conn, const char *data, size_t len) {
@@ -94,6 +101,7 @@ static int queue_bytes(Connection *conn, const char *data, size_t len) {
     }
 
     size_t pending = conn->output_used - conn->output_sent;
+    if (len > MAX_OUTPUT_CAPACITY - pending) return -1;
     if (conn->output_sent > 0 && pending > 0) {
         memmove(conn->output, conn->output + conn->output_sent, pending);
         conn->output_used = pending;
@@ -129,7 +137,7 @@ static int queue_text(Connection *conn, const char *text) {
 
 static int flush_output(Connection *conn) {
     while (conn->output_sent < conn->output_used) {
-        ssize_t written = write(conn->fd, conn->output + conn->output_sent, conn->output_used - conn->output_sent);
+        ssize_t written = send(conn->fd, conn->output + conn->output_sent, conn->output_used - conn->output_sent, MSG_NOSIGNAL);
         if (written < 0) {
             if (errno == EINTR) {
                 continue;
@@ -178,11 +186,24 @@ static int handle_store_write(Connection *conn, const char *key, const char *val
 }
 
 static int handle_command(Connection *conn, char *line) {
-    char command[16] = {0};
-    char key[256] = {0};
-    char value[768] = {0};
-    char ttl[32] = {0};
-    int num_tokens = sscanf(line, "%15s %255s %767s %31s", command, key, value, ttl);
+    /* Tokenize in place: no format interpreter, copies, or truncation. */
+    char *tokens[5];
+    int num_tokens = 0;
+    char *cursor = line;
+    while (*cursor && num_tokens < 5) {
+        while (isspace((unsigned char)*cursor)) cursor++;
+        if (!*cursor) break;
+        tokens[num_tokens++] = cursor;
+        while (*cursor && !isspace((unsigned char)*cursor)) cursor++;
+        if (*cursor) *cursor++ = '\0';
+    }
+    char *command = num_tokens > 0 ? tokens[0] : "";
+    char *key = num_tokens > 1 ? tokens[1] : "";
+    char *value = num_tokens > 2 ? tokens[2] : "";
+    char *ttl = num_tokens > 3 ? tokens[3] : "";
+    if (num_tokens > 4 || strlen(command) > 15 || strlen(key) > 255 ||
+        strlen(value) > 767 || strlen(ttl) > 31)
+        return queue_text(conn, "Error: invalid command arguments\n");
 
     if (num_tokens < 1) {
         return queue_text(conn, "Error: invalid command! Use write, search, dump, delete, size, wipe or quit.\n");
@@ -203,30 +224,21 @@ static int handle_command(Connection *conn, char *line) {
         StoreEntry entry;
         StoreResult result = store_get(global_store, key, &entry);
         if (result == STORE_OK) {
-            int needed = snprintf(NULL, 0, "Found: %s, timestamp: %ld\n", entry.value, (long)entry.created_at);
-            if (needed < 0) {
-                store_entry_free(&entry);
-                return -1;
-            }
-
-            char *response = malloc((size_t)needed + 1);
-            if (!response) {
-                store_entry_free(&entry);
-                return -1;
-            }
-            snprintf(response, (size_t)needed + 1, "Found: %s, timestamp: %ld\n", entry.value, (long)entry.created_at);
-            int queued = queue_text(conn, response);
-            free(response);
+            char response[832]; /* protocol values are at most 767 bytes */
+            int needed = snprintf(response, sizeof(response), "Found: %s, timestamp: %ld\n",
+                                  entry.value, (long)entry.created_at);
+            int queued = needed < 0 || (size_t)needed >= sizeof(response) ? -1 :
+                         queue_bytes(conn, response, (size_t)needed);
             store_entry_free(&entry);
             return queued;
         }
-        return queue_text(conn, "Not found\n");
+        return queue_text(conn, result == STORE_NOT_FOUND ? "Not found\n" : "Error: failed to read\n");
     }
-    if (strcasecmp(command, "quit") == 0) {
+    if (strcasecmp(command, "quit") == 0 && num_tokens == 1) {
         conn->close_after_write = 1;
         return queue_text(conn, "Goodbye!\n");
     }
-    if (strcasecmp(command, "dump") == 0) {
+    if (strcasecmp(command, "dump") == 0 && (num_tokens == 1 || num_tokens == 3)) {
         size_t index = 0;
         size_t offset = INITIAL_CAPACITY - 1;
         if (num_tokens == 3) {
@@ -242,12 +254,12 @@ static int handle_command(Connection *conn, char *line) {
         }
         return queue_text(conn, "Error: failed to dump store\n");
     }
-    if (strcasecmp(command, "size") == 0) {
+    if (strcasecmp(command, "size") == 0 && num_tokens == 1) {
         char response[128];
         snprintf(response, sizeof(response), "%zu, %zu\n", store_count(global_store), store_capacity(global_store));
         return queue_text(conn, response);
     }
-    if (strcasecmp(command, "wipe") == 0) {
+    if (strcasecmp(command, "wipe") == 0 && num_tokens == 1) {
         store_clear(global_store);
         return queue_text(conn, "All clean!\n");
     }
@@ -270,39 +282,31 @@ static void consume_input(Connection *conn, size_t consumed) {
 }
 
 static int process_input_lines(Connection *conn) {
-    while (1) {
-        void *newline_ptr = memchr(conn->input, '\n', conn->input_used);
-        if (!newline_ptr) {
-            if (conn->input_used == sizeof(conn->input)) {
-                conn->input_used = 0;
-                conn->close_after_write = 1;
-                return queue_text(conn, "Error: command too long\n");
-            }
-            return 0;
-        }
-
-        size_t line_len = (char *)newline_ptr - conn->input;
-        size_t consumed = line_len + 1;
-        if (line_len > 0 && conn->input[line_len - 1] == '\r') {
-            line_len--;
-        }
-
-        char line[INPUT_BUFFER_SIZE];
-        memcpy(line, conn->input, line_len);
-        line[line_len] = '\0';
-        consume_input(conn, consumed);
-
-        if (handle_command(conn, line) < 0) {
-            return -1;
-        }
-        if (conn->close_after_write) {
-            return 0;
-        }
+    size_t consumed = 0;
+    while (consumed < conn->input_used) {
+        char *line = conn->input + consumed;
+        char *newline = memchr(line, '\n', conn->input_used - consumed);
+        if (!newline) break;
+        size_t length = (size_t)(newline - line);
+        /* Reject embedded NULs instead of executing a truncated prefix. */
+        if (memchr(line, '\0', length)) return -1;
+        *newline = '\0';
+        if (length && line[length - 1] == '\r') line[length - 1] = '\0';
+        consumed = (size_t)(newline - conn->input) + 1;
+        if (handle_command(conn, line) < 0) return -1;
+        if (conn->close_after_write) break;
     }
+    consume_input(conn, consumed);
+    if (conn->input_used == sizeof(conn->input)) {
+        conn->input_used = 0;
+        conn->close_after_write = 1;
+        return queue_text(conn, "Error: command too long\n");
+    }
+    return 0;
 }
 
 static int read_client_data(Connection *conn) {
-    while (!conn->close_after_write) {
+    for (int batch = 0; batch < 16 && !conn->close_after_write; batch++) {
         ssize_t bytes_read = read(conn->fd, conn->input + conn->input_used, sizeof(conn->input) - conn->input_used);
         if (bytes_read < 0) {
             if (errno == EINTR) {
@@ -315,13 +319,18 @@ static int read_client_data(Connection *conn) {
         }
 
         if (bytes_read == 0) {
-            return 1;
+            conn->close_after_write = 1;
+            return conn->output_sent == conn->output_used ? 1 : 0;
         }
 
         conn->input_used += (size_t)bytes_read;
         if (process_input_lines(conn) < 0) {
             return -1;
         }
+        /* Bound queued replies even when a peer pipelines without reading.
+         * Flush once per read batch, rather than after draining the socket. */
+        int flushed = flush_output(conn);
+        if (flushed != 0) return flushed;
         if (conn->input_used == sizeof(conn->input) && !conn->close_after_write) {
             conn->input_used = 0;
             conn->close_after_write = 1;
@@ -337,11 +346,11 @@ static int read_client_data(Connection *conn) {
 static void handle_connection_event(Connection *conn, uint32_t events) {
     int should_close = 0;
 
-    if (events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+    if (events & (EPOLLERR | EPOLLHUP)) {
         should_close = 1;
     }
 
-    if (!should_close && (events & EPOLLIN)) {
+    if (!should_close && (events & (EPOLLIN | EPOLLRDHUP))) {
         int read_result = read_client_data(conn);
         if (read_result != 0) {
             should_close = 1;
@@ -401,6 +410,9 @@ static int accept_client(int client_socket) {
         return -1;
     }
 
+    int nodelay = 1;
+    setsockopt(client_socket, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+
     Worker *worker = &workers[next_worker];
     next_worker = (next_worker + 1) % WORKER_THREADS;
 
@@ -411,8 +423,9 @@ static int accept_client(int client_socket) {
     }
 
     struct epoll_event event;
-    event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
+    event.events = EPOLLIN | EPOLLRDHUP;
     event.data.ptr = conn;
+    conn->registered_events = event.events;
     if (epoll_ctl(worker->epoll_fd, EPOLL_CTL_ADD, client_socket, &event) < 0) {
         perror("epoll_ctl client");
         connection_destroy(conn);
